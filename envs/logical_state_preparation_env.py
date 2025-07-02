@@ -469,7 +469,6 @@ class LogicalStatePreparationEnv(environment.Environment):
         
         # Check number of steps in episode termination condition
         done_steps = state.time >= self.max_steps
-
         done = jnp.logical_or(done_encoding, done_steps)
 
         return done
@@ -511,12 +510,12 @@ class LogicalStatePreparationEnv(environment.Environment):
         return "LogicalStatePreparation-v0"
 
     @property
-    def num_actions(self, params: EnvParams | None) -> int:
+    def num_actions(self, params: EnvParams | None = None) -> int:
         """Number of actions possible in environment."""
         return self.actions.shape[0]
 
     def action_space(
-        self, params: EnvParams | None
+        self, params: EnvParams | None = None
     ) -> spaces.Discrete:
         """Action space of the environment."""
         return spaces.Discrete(self.num_actions)
