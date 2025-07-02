@@ -46,7 +46,7 @@ class HeterogenousAttentionBlock(nn.Module):
         self.softmax = nn.Softmax(-1)
         self.residual_layer = ResidualLayer()
         self.init_attention_layers()
-        self.init_feedforward_networks()
+        self.init_projection_networks()
 
     def init_attention_layers(self) -> None:
         self.kwA = nn.Linear(self.token_dims.dA, self.embedding_dim)
@@ -67,12 +67,18 @@ class HeterogenousAttentionBlock(nn.Module):
         self.vwD = nn.Linear(self.token_dims.dD, self.embedding_dim)
         self.vwE = nn.Linear(self.token_dims.dE, self.embedding_dim)
 
-    def init_feedforward_networks(self) -> None:
-        self.fcn_A = nn.Linear(self.embedding_dim * 4, self.token_dims.dA)
-        self.fcn_B = nn.Linear(self.embedding_dim * 4, self.token_dims.dB)
-        self.fcn_C = nn.Linear(self.embedding_dim * 4, self.token_dims.dC)
-        self.fcn_D = nn.Linear(self.embedding_dim * 4, self.token_dims.dD)
-        self.fcn_E = nn.Linear(self.embedding_dim * 4, self.token_dims.dE)
+    def init_projection_networks(self) -> None:
+        def projection_layer(o_dim: int):
+            return nn.Sequential(
+                nn.Linear(self.embedding_dim * 4, o_dim),
+                nn.ReLU(),
+                nn.LayerNorm(o_dim)
+            )
+        self.p_A = projection_layer(self.token_dims.dA)
+        self.p_B = projection_layer(self.token_dims.dB)
+        self.p_C = projection_layer(self.token_dims.dC)
+        self.p_D = projection_layer(self.token_dims.dD)
+        self.p_E = projection_layer(self.token_dims.dE)
 
     def get_attention_output(
         self, q: Tensor, kv_pairs: list[tuple[Tensor, Tensor]]
@@ -128,11 +134,11 @@ class HeterogenousAttentionBlock(nn.Module):
             qE, [(kA, vA), (kB, vB), (kC, vC), (kD, vD)]
         )
 
-        additive_inp_A = self.fcn_A(attention_to_A)
-        additive_inp_B = self.fcn_B(attention_to_B)
-        additive_inp_C = self.fcn_C(attention_to_C)
-        additive_inp_D = self.fcn_D(attention_to_D)
-        additive_inp_E = self.fcn_E(attention_to_E)
+        additive_inp_A = self.p_A(attention_to_A)
+        additive_inp_B = self.p_B(attention_to_B)
+        additive_inp_C = self.p_C(attention_to_C)
+        additive_inp_D = self.p_D(attention_to_D)
+        additive_inp_E = self.p_E(attention_to_E)
 
         return Tokens(
             self.residual_layer(x.A, additive_inp_A),
