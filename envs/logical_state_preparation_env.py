@@ -379,7 +379,7 @@ class LogicalStatePreparationEnv(environment.Environment):
         return returned_state[1], returned_state[2]
   
     def step_env(
-        self, key: chex.PRNGKey, state: EnvState, action: int, params: EnvParams
+        self, key: chex.PRNGKey, state: EnvState, action: int, params: EnvParams | None
         ) -> Tuple[chex.Array, EnvState, float, bool, dict]:
         """Performs step transitions in the environment.
 
