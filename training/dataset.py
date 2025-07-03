@@ -1,5 +1,9 @@
 import jax  # Only for interacting with LSP environment
 import numpy as np
+import random
+import string
+import pickle
+import time
 import torch
 from typing import Any
 from models.input import GT_1Q, GT_2Q, Layout, sample_layout
@@ -41,16 +45,18 @@ class TrainingInstance:
         self.gates = gates
         self.observation = observation
         self.env = env
-    
+
     def __hash__(self):
-        return hash((
-            self.n,
-            str(self.layout.graph.numpy()),
-            str([x.value for x in self.gate_set_1q]),
-            str([x.value for x in self.gate_set_2q]),
-            self.circuit_depth,
-            str(self.gates)
-        ))
+        return hash(
+            (
+                self.n,
+                str(self.layout.graph.numpy()),
+                str([x.value for x in self.gate_set_1q]),
+                str([x.value for x in self.gate_set_2q]),
+                self.circuit_depth,
+                str(self.gates),
+            )
+        )
 
 
 def sample_gate_set(
@@ -215,3 +221,73 @@ def generate_training_data_for_given_params(
         ),
         key,
     )
+
+
+def generate_training_data(
+    N: int,
+    jax_rng_key: jax.Array,
+    gen: torch.Generator,
+    folder: str,
+    use_random: bool = False,
+) -> None:
+    def generate_file_name(folder, index, use_random):
+        file_name = f"{folder}/"
+        if use_random:
+            file_name = (
+                file_name
+                + "".join(
+                    random.choice(string.ascii_lowercase + string.digits)
+                    for _ in range(14)
+                )
+                + ".pkl"
+            )
+        else:
+            file_name = file_name + f"{index}.pkl"
+        return file_name
+
+    batch = []
+    batch_size = 10_000
+    batch_count = 0
+    n_min, n_max = 2, 20
+    generated_set = set()
+    for _i in range(N):
+        n = torch.randint(low=n_min, high=n_max, size=(1,), generator=gen)[0]
+        n = n.int().item()
+        instance, jax_rng_key = generate_training_data_for_given_params(
+            n, jax_rng_key, gen
+        )
+        if hash(instance) in generated_set:
+            continue
+        generated_set.add(hash(instance))
+        batch.append(instance)
+        file_name = generate_file_name(folder, batch_count, use_random)
+        if len(batch) == batch_size:
+            with open(file_name, "wb") as f:
+                pickle.dump(batch, f)
+                batch = []
+                batch_count += 1
+    file_name = generate_file_name(folder, batch_count, use_random)
+    if len(batch) > 0:
+        with open(file_name, "wb") as f:
+            pickle.dump(batch, f)
+            batch = []
+            batch_count += 1
+
+if __name__ == "__main__":
+    import argparse
+
+    seed = time.time_ns()
+
+    # JAX RNG
+    key = jax.random.key(seed)
+
+    # Torch RNG
+    gen = torch.Generator()
+    gen.manual_seed(seed)
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-n", type=int, default=100, help="Number of training instances to generate")
+    parser.add_argument("-f", type=str, default="training-data", help="Relative path to (existing) output folder")
+    parser.add_argument("--random-name", action='store_true', help="Use random names for file outputs")
+    args = parser.parse_args()
+    generate_training_data(args.n, key, gen, args.f, args.random_name)
