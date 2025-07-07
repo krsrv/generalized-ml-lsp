@@ -375,8 +375,11 @@ class LogicalStatePreparationEnv(environment.Environment):
         column_index = column_index.at[1::2].set(column_index[0::2] + num_qubits)
             
         init_val = (0, check_matrix_inp.astype(jnp.uint8), sign_inp.astype(jnp.uint8), 0, column_index)
-        returned_state = jax.lax.while_loop(cond_fun = cond, body_fun=body, init_val= init_val)
-        return returned_state[1], returned_state[2]
+        state = init_val
+        while cond(state):
+            state = body(state)
+        # returned_state = jax.lax.while_loop(cond_fun = cond, body_fun=body, init_val= init_val)
+        return state[1], state[2]
   
     def step_env(
         self, key: chex.PRNGKey, state: EnvState, action: int, params: EnvParams | None
