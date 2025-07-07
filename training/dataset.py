@@ -5,7 +5,14 @@ import string
 import pickle
 import time
 import torch
+import os
 from typing import Any
+
+os.environ['XLA_PYTHON_CLIENT_MEM_FRACTION'] = '0.1'
+os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false'
+os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
+jax.config.update('jax_platform_name', 'cpu')
+
 from models.input import GT_1Q, GT_2Q, Layout, sample_layout
 from envs.logical_state_preparation_env import LogicalStatePreparationEnv
 from simulators.clifford_gates import CliffordGates
@@ -34,7 +41,7 @@ class TrainingInstance:
         gate_set_2q: list[GT_2Q],
         circuit_depth: int,
         gates: list[Any],
-        observation: torch.Tensor,
+        observation: torch.Tensor | list[torch.Tensor],
         env: LogicalStatePreparationEnv,
     ) -> None:
         self.n = n
@@ -162,43 +169,86 @@ def create_lsp_env(
     )
 
 
-def generate_training_data_for_given_params(
-    n: int,
-    jax_rng_key: jax.Array,
-    gen: torch.Generator | None = None,
-) -> tuple[TrainingInstance, jax.Array]:
-    """Given `n` = # qubits, generate a circuit of n qubits with a random topology
-    and random gate set, with depth = `depth`.
-    Args:
-        n
-        keys: Tuple of 4 RNGs for jax
-        gen: torch.Generator
-    """
-    key, key_reset, key_act, key_step = jax.random.split(jax_rng_key, 4)
+def sample_parameters(
+    n_min: int, n_max: int, gen: torch.Generator | None = None, use_max_depth=True
+):
+    """Sample the following:
+    number of qubits
+    layout
+    1 qubit gate set
+    2 qubit gate set
+    circuit depth
 
+    The sampled objects are returned wrapped in a TrainingInstance object.
+    """
+    # n = Number of qubits
+    n = torch.randint(low=n_min, high=n_max, size=(1,), generator=gen)[0]
+    n = n.int().item()
+
+    # Layout
     layout = sample_layout(n, gen)
+    # Gate set
     gate_set_1q, gate_set_2q = sample_gate_set(gen)
 
     if len(gate_set_1q) + len(gate_set_2q) < 2:
         d_max = 3
     else:
-        d_max = np.floor(
-            n * n / np.log2(len(gate_set_1q) + len(gate_set_2q)),
-            casting="unsafe",
-            dtype=np.int32,
+        d_max = np.max((
+            len(gate_set_1q) + len(gate_set_2q),
+            np.floor(
+                n * n / np.log2(len(gate_set_1q) + len(gate_set_2q)),
+                casting="unsafe",
+                dtype=np.int32,
+            ),
+        ))
+    if use_max_depth:
+        depth = d_max
+    else:
+        depth = (
+            torch.randint(low=1, high=d_max, size=(1,), generator=gen)[0]
+            if d_max > 1
+            else torch.tensor(1)
         )
-    print(f"GT 1Q: {gate_set_1q}, GT 2Q: {gate_set_2q}, n: {n}, max depth: {d_max}")
-    depth = (
-        torch.randint(low=1, high=d_max, size=(1,), generator=gen)[0]
-        if d_max > 1
-        else torch.tensor(1)
-    )
-    depth = depth.item()
+        depth = depth.item()
 
-    lsp_env = create_lsp_env(layout, gate_set_1q, gate_set_2q, depth)
+    return TrainingInstance(
+        n,
+        layout,
+        gate_set_1q,
+        gate_set_2q,
+        depth,
+        None,
+        None,
+        None,
+    )
+
+
+def generate_training_data_for_given_params(
+    base_structure: TrainingInstance,
+    jax_rng_key: jax.Array,
+    gen: torch.Generator | None = None,
+    store_every_gate_output: bool = False,
+) -> tuple[TrainingInstance | list[TrainingInstance], jax.Array]:
+    """Given a partiall populated TrainingInstance `x` objects, generate a circuit of n = x.n qubits
+    with topology sepcified by x.layout, gate set by x.gate_set_{1q,2q} and depth x.circuit_depth
+    Args:
+        TrainingInstance
+        keys: Tuple of 4 RNGs for jax
+        gen: torch.Generator
+    """
+    key, key_reset, key_act, key_step = jax.random.split(jax_rng_key, 4)
+
+    lsp_env = create_lsp_env(
+        base_structure.layout,
+        base_structure.gate_set_1q,
+        base_structure.gate_set_2q,
+        base_structure.circuit_depth,
+    )
 
     env_params = None
     _observation, env_state = lsp_env.reset_env(key_reset, env_params)
+
+    n = base_structure.n
     assert (
         _observation.shape[-1] == 2 * n * n + n
     ), f"""Implementation (e.g. StabilizerEncoding) depends on the shape
@@ -206,7 +256,8 @@ def generate_training_data_for_given_params(
     instead"""
 
     gate_list = []
-    for _ in range(depth):
+    training_instance_list = []
+    for d in range(base_structure.circuit_depth):
         key_act, _rng = jax.random.split(key_act)
         gate_list.append(lsp_env.action_space(env_params).sample(key_act))
 
@@ -214,13 +265,22 @@ def generate_training_data_for_given_params(
         observation, env_state, _reward, _done, _info = lsp_env.step_env(
             key_step, env_state, gate_list[-1], env_params
         )
-    observation = torch.from_dlpack(observation).long()
-    return (
-        TrainingInstance(
-            n, layout, gate_set_1q, gate_set_2q, depth, gate_list, observation, lsp_env
-        ),
-        key,
-    )
+        training_instance_list.append(
+            TrainingInstance(
+                base_structure.n,
+                base_structure.layout,
+                base_structure.gate_set_1q,
+                base_structure.gate_set_2q,
+                d,
+                gate_list.copy(),
+                np.array(observation),
+                lsp_env,
+            )
+        )
+    if store_every_gate_output:
+        return (training_instance_list, key)
+    else:
+        return (training_instance_list[-1], key)
 
 
 def generate_training_data(
@@ -228,10 +288,13 @@ def generate_training_data(
     jax_rng_key: jax.Array,
     gen: torch.Generator,
     folder: str,
+    prefix: str="",
     use_random: bool = False,
 ) -> None:
     def generate_file_name(folder, index, use_random):
         file_name = f"{folder}/"
+        if prefix != "":
+            file_name += f"{prefix}-"
         if use_random:
             file_name = (
                 file_name
@@ -241,27 +304,43 @@ def generate_training_data(
                 )
                 + ".pkl"
             )
+            if os.path.exists(file_name):
+                return generate_file_name(folder, index, use_random)
         else:
             file_name = file_name + f"{index}.pkl"
         return file_name
 
-    batch = []
-    batch_size = 10_000
+    batch: list[TrainingInstance] = []
+    batch_size = 1_00
     batch_count = 0
     n_min, n_max = 2, 20
-    generated_set = set()
+    # generated_set = set()
     for _i in range(N):
-        n = torch.randint(low=n_min, high=n_max, size=(1,), generator=gen)[0]
-        n = n.int().item()
-        instance, jax_rng_key = generate_training_data_for_given_params(
-            n, jax_rng_key, gen
-        )
-        if hash(instance) in generated_set:
+        try:
+            # Sample random parameters
+            base_structure = sample_parameters(n_min, n_max, gen, use_max_depth=True)
+            print(f"n: {base_structure.n}, gates: {base_structure.gate_set_1q}, {base_structure.gate_set_2q}, edges: {len(base_structure.layout.adjacency_list)}, max_depth: {base_structure.circuit_depth}")
+            instances, jax_rng_key = generate_training_data_for_given_params(
+                base_structure, jax_rng_key, gen, store_every_gate_output=True
+            )
+            # if hash(instance) in generated_set:
+            #     continue
+            # generated_set.add(hash(instance))
+            # Handle both single instance and list of instances
+            if isinstance(instances, list):
+                batch = batch + instances
+            else:
+                batch.append(instances)
+            
+            # Force garbage collection to free memory
+            # import gc
+            # gc.collect()
+            
+        except Exception as e:
+            print(f"Error generating instance {_i}: {e}")
             continue
-        generated_set.add(hash(instance))
-        batch.append(instance)
         file_name = generate_file_name(folder, batch_count, use_random)
-        if len(batch) == batch_size:
+        if len(batch) > batch_size:
             with open(file_name, "wb") as f:
                 pickle.dump(batch, f)
                 batch = []
@@ -273,9 +352,7 @@ def generate_training_data(
             batch = []
             batch_count += 1
 
-if __name__ == "__main__":
-    import argparse
-
+def parallel_task(n_instances, folder, prefix, random_name):
     seed = time.time_ns()
 
     # JAX RNG
@@ -284,10 +361,42 @@ if __name__ == "__main__":
     # Torch RNG
     gen = torch.Generator()
     gen.manual_seed(seed)
+    tic = time.time()
+    generate_training_data(n_instances, key, gen, folder, prefix, random_name)
+    toc = time.time()
+    print(toc-tic)
+
+if __name__ == "__main__":
+    import argparse
+    import multiprocessing
+
+    def task(_):
+        parallel_task(args.n, args.f, args.p, args.random_name)
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("-n", type=int, default=100, help="Number of training instances to generate")
-    parser.add_argument("-f", type=str, default="training-data", help="Relative path to (existing) output folder")
-    parser.add_argument("--random-name", action='store_true', help="Use random names for file outputs")
+    parser.add_argument(
+        "-n", type=int, default=100, help="Number of training instances to generate"
+    )
+    parser.add_argument(
+        "-f",
+        type=str,
+        default="training-data",
+        help="Relative path to (existing) output folder",
+    )
+    parser.add_argument(
+        "-p",
+        type=str,
+        default="",
+        help="file name prefix",
+    )
+    parser.add_argument(
+        "--random-name", action="store_true", help="Use random names for file outputs"
+    )
+    parser.add_argument(
+        "-t", type=int, default=8, help="Number of processes to spawn"
+    )
     args = parser.parse_args()
-    generate_training_data(args.n, key, gen, args.f, args.random_name)
+    with multiprocessing.Pool(processes=args.t) as pool:  # 8 CPUs available
+        results = pool.map(task, range(args.t))
+    # return results
+    # parallelize_task()
