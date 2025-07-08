@@ -128,7 +128,7 @@ def create_lsp_env(
     """Create LSP environment based on the chosen layout and gate sets."""
     n = layout.graph.shape[0]
     # Set target to be the all 0 state.
-    identity_string = f"{"".join(["I" for _ in range(n)])}"
+    identity_string = "".join(["I" for _ in range(n)])
     target = [
         "+" + identity_string[:i] + "Z" + identity_string[i + 1 :] for i in range(n)
     ]
@@ -291,7 +291,7 @@ def generate_training_data(
     prefix: str="",
     use_random: bool = False,
 ) -> None:
-    def generate_file_name(folder, index, use_random):
+    def generate_file_name(folder, index, n_count, use_random):
         file_name = f"{folder}/"
         if prefix != "":
             file_name += f"{prefix}-"
@@ -301,13 +301,13 @@ def generate_training_data(
                 + "".join(
                     random.choice(string.ascii_lowercase + string.digits)
                     for _ in range(14)
-                )
+                ) + f"-{n_count}"
                 + ".pkl"
             )
             if os.path.exists(file_name):
-                return generate_file_name(folder, index, use_random)
+                return generate_file_name(folder, index, n_count, use_random)
         else:
-            file_name = file_name + f"{index}.pkl"
+            file_name = file_name + f"{index}-{n_count}.pkl"
         return file_name
 
     batch: list[TrainingInstance] = []
@@ -319,7 +319,7 @@ def generate_training_data(
         try:
             # Sample random parameters
             base_structure = sample_parameters(n_min, n_max, gen, use_max_depth=True)
-            print(f"n: {base_structure.n}, gates: {base_structure.gate_set_1q}, {base_structure.gate_set_2q}, edges: {len(base_structure.layout.adjacency_list)}, max_depth: {base_structure.circuit_depth}")
+            # print(f"n: {base_structure.n}, gates: {base_structure.gate_set_1q}, {base_structure.gate_set_2q}, edges: {len(base_structure.layout.adjacency_list)}, max_depth: {base_structure.circuit_depth}")
             instances, jax_rng_key = generate_training_data_for_given_params(
                 base_structure, jax_rng_key, gen, store_every_gate_output=True
             )
@@ -339,13 +339,13 @@ def generate_training_data(
         except Exception as e:
             print(f"Error generating instance {_i}: {e}")
             continue
-        file_name = generate_file_name(folder, batch_count, use_random)
+        file_name = generate_file_name(folder, batch_count, _i, use_random)
         if len(batch) > batch_size:
             with open(file_name, "wb") as f:
                 pickle.dump(batch, f)
                 batch = []
                 batch_count += 1
-    file_name = generate_file_name(folder, batch_count, use_random)
+    file_name = generate_file_name(folder, batch_count, _i, use_random)
     if len(batch) > 0:
         with open(file_name, "wb") as f:
             pickle.dump(batch, f)
