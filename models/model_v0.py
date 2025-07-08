@@ -73,16 +73,18 @@ class ModelV0(nn.Module):
 
     def forward(
         self,
-        layout: Layout,
-        gate_set_1q: list[GT_1Q],
-        gate_set_2q: list[GT_2Q],
+        graph: Tensor,
+        ctrl_oh: Tensor,
+        tgt_oh: Tensor,
+        gate_set_1q_oh: Tensor,
+        gate_set_2q_oh: Tensor,
         observation: Tensor,
     ) -> tuple[Tensor, Tensor]:
         # Note:
         # 1. `graph_eigvec` -> each column represents an eigenvector
         # 2. eigh is specifically for Hermitian matrices. If the input is a real matrix,
         #    the eigenvectors and eigenvalues are both guaranteed to be reals as well.
-        graph_eigval, graph_eigvec = torch.linalg.eigh(layout.graph.float())
+        graph_eigval, graph_eigvec = torch.linalg.eigh(graph.float())
         # Token A -> Global token representing the graph
         global_tensor = self.token_A_embedding(graph_eigval)
         # Token B
@@ -93,7 +95,7 @@ class ModelV0(nn.Module):
         nq = qubit_tensors.shape[-2]
         # Token C
         gate_tensors = self.token_C_embedding(
-            gate_set_1q, gate_set_2q, qubit_tensors, layout
+            gate_set_1q_oh, gate_set_2q_oh, qubit_tensors, ctrl_oh, tgt_oh
         )
         # Token D
         stabilizer_tensors = self.token_D_embedding(nq, observation)

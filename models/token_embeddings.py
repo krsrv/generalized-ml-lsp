@@ -64,12 +64,12 @@ class Token_C_Embedding(nn.Module):
         self.gate_2q_embedding_layer = Gate2QEmbedding(token_dims.dC)
 
     def forward(
-        self, gset_1q: list[GT_1Q], gset_2q: list[GT_2Q], qubits: Tensor, layout: Layout
+        self, gset_1q_oh: Tensor, gset_2q_oh: Tensor, qubits: Tensor, ctrl_oh: Tensor, tgt_oh: Tensor
     ):
         return torch.cat(
             (
-                self.gate_1q_embedding_layer(gset_1q, qubits),
-                self.gate_2q_embedding_layer(gset_2q, qubits, layout),
+                self.gate_1q_embedding_layer(gset_1q_oh, qubits),
+                self.gate_2q_embedding_layer(gset_2q_oh, qubits, ctrl_oh, tgt_oh),
             ),
             dim=-2,
         )

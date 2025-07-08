@@ -6,6 +6,7 @@ from torch import Tensor
 
 from .input import Layout, GT_1Q, GT_2Q
 from .tokens import Tokens, TokenProperties
+from .utils import create_oh_vectors_from_enum
 
 
 def _cartesian_add(x: Tensor, y: Tensor) -> Tensor:
@@ -27,11 +28,10 @@ def _cartesian_add(x: Tensor, y: Tensor) -> Tensor:
     return x + y
 
 
-def _generate_qubit_pair(qubits: Tensor, layout: Layout) -> Tensor:
+def _generate_qubit_pair(qubits: Tensor, ctrl: Tensor, tgt: Tensor) -> Tensor:
     """Given a layout of qubits with specified connectivity, and the qubit embeddings [q[0], ..., q[n-1]]
     return a tensor of concat(q[i], q[j]) where (i, j) forms an edge in the graph layout.
     """
-    ctrl, tgt = layout.adjacency_oh_matrices
     return torch.concat(
         (torch.matmul(ctrl.float(), qubits), torch.matmul(tgt.float(), qubits)), dim=-1
     )
@@ -89,15 +89,11 @@ class Gate1QEmbedding(nn.Module):
         self.embedding_dim = embedding_dim
         self.layer = nn.Linear(len(GT_1Q), embedding_dim, bias=False)
 
-    def forward(self, gate_set: list[GT_1Q], qubits: Tensor) -> Tensor:
+    def forward(self, gate_set_oh: Tensor, qubits: Tensor) -> Tensor:
         """Generate embeddings of each pair (Gate, Qubit) where qubit index moves first."""
         # (-1) to ensure indexing starts from 0
         weights = self.layer(F.one_hot(torch.arange(0, len(GT_1Q))).float())
-        gate_idxs = (
-            torch.tensor([gate.value for gate in gate_set], dtype=torch.int64) - 1
-        )
-        gates_oh = F.one_hot(gate_idxs, num_classes=len(GT_1Q)).float()
-        gate_embeddings = torch.matmul(gates_oh, weights)
+        gate_embeddings = torch.matmul(gate_set_oh.float(), weights)
         result = _cartesian_add(
             gate_embeddings, F.pad(qubits, (0, qubits.shape[-1]), "constant", 0)
         )
@@ -118,16 +114,11 @@ class Gate2QEmbedding(nn.Module):
         self.embedding_dim = embedding_dim
         self.layer = nn.Linear(len(GT_2Q), embedding_dim, bias=False)
 
-    def forward(self, gate_set: list[GT_2Q], qubits: Tensor, layout: Layout) -> Tensor:
+    def forward(self, gate_set_oh: Tensor, qubits: Tensor, ctrl_oh: Tensor, tgt_oh: Tensor) -> Tensor:
         """Generate embeddings of each pair (Gate, Qubit-Qubit) where qubit index moves first."""
         weights = self.layer(F.one_hot(torch.arange(0, len(GT_2Q))).float())
-        # (-1) to ensure indexing starts from 0
-        gate_idxs = (
-            torch.tensor([gate.value for gate in gate_set], dtype=torch.int64) - 1
-        )
-        gates_oh = F.one_hot(gate_idxs, num_classes=len(GT_2Q)).float()
-        gate_embeddings = torch.matmul(gates_oh, weights)
-        result = _cartesian_add(gate_embeddings, _generate_qubit_pair(qubits, layout))
+        gate_embeddings = torch.matmul(gate_set_oh.float(), weights)
+        result = _cartesian_add(gate_embeddings, _generate_qubit_pair(qubits, ctrl_oh, tgt_oh))
         return result
 
 
