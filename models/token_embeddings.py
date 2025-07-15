@@ -13,6 +13,8 @@ from .embeddings import (
     TableauCellEmbedding,
 )
 
+def _pad_last_dim(tensor: Tensor, pad_size: int) -> Tensor:
+    return F.pad(tensor, (0, pad_size), "constant", 0)
 
 class Token_A_Embedding(nn.Module):
     """Global token representing the graph. It is the (truncated) eigenvalue list of the graph
@@ -21,13 +23,16 @@ class Token_A_Embedding(nn.Module):
 
     def __init__(self, token_dims: TokenProperties) -> None:
         super().__init__()
-        self.truncation_dim = token_dims.dA
+        self.truncation_dim = token_dims.A_eigval_trunc_dim
+        self.dim = token_dims.dA
 
     def forward(self, x: Tensor) -> Tensor:
+        # Cut down x to `truncation_dim` first and then pad with 0s.
         if x.shape[-1] < self.truncation_dim:
-            x = F.pad(x, (0, self.truncation_dim - x.shape[-1]), "constant", 0)
+            x = _pad_last_dim(x, self.truncation_dim - x.shape[-1])
         else:
             x = torch.narrow(x, -1, 0, self.truncation_dim)
+        x = _pad_last_dim(x, self.dim - self.truncation_dim)
         return torch.unsqueeze(x, -2)
 
 
@@ -38,17 +43,20 @@ class Token_B_Embedding(nn.Module):
 
     def __init__(self, token_dims: TokenProperties) -> None:
         super().__init__()
-        self.truncation_dim = token_dims.dB // 2
+        self.truncation_dim = token_dims.B_eigvec_trunc_dim
         self.positional_enc_layer = PositionalEncoding(
-            embedding_dim=self.truncation_dim
+            embedding_dim=token_dims.B_positional_embed_dim
         )
 
     def forward(self, x: Tensor) -> Tensor:
         if x.shape[-1] < self.truncation_dim:
-            x = F.pad(x, (0, self.truncation_dim - x.shape[-1]), "constant", 0)
+            x = _pad_last_dim(x, self.truncation_dim - x.shape[-1])
         else:
             x = torch.narrow(x, -1, 0, self.truncation_dim)
-        return torch.cat((x, self.positional_enc_layer(x)), dim=-1)
+        pos = self.positional_enc_layer(x)
+        if len(x.shape) == 3 and len(pos.shape) == 2:
+            pos = pos.unsqueeze(0).expand(x.shape[0], -1, -1)
+        return torch.cat((x, pos), dim=-1)
 
 
 class Token_C_Embedding(nn.Module):
@@ -60,16 +68,35 @@ class Token_C_Embedding(nn.Module):
 
     def __init__(self, token_dims: TokenProperties) -> None:
         super().__init__()
-        self.gate_1q_embedding_layer = Gate1QEmbedding(token_dims.dC)
-        self.gate_2q_embedding_layer = Gate2QEmbedding(token_dims.dC)
+        self.gate_1q_embedding_layer = Gate1QEmbedding(token_dims.C_gt_1q_dim)
+        self.gate_2q_embedding_layer = Gate2QEmbedding(token_dims.C_gt_2q_dim)
+
+        self.gate_1q_pad_gate = token_dims.C_pad_gt_1q_gate
+        self.gate_1q_pad_qubit = token_dims.C_pad_gt_1q_qubit
+        self.gate_2q_pad_gate = token_dims.C_pad_gt_2q_gate
+        self.gate_2q_pad_qubit = token_dims.C_pad_gt_2q_qubit
 
     def forward(
-        self, gset_1q_oh: Tensor, gset_2q_oh: Tensor, qubits: Tensor, ctrl_oh: Tensor, tgt_oh: Tensor
+        self,
+        gset_1q_oh: Tensor,
+        gset_2q_oh: Tensor,
+        qubits: Tensor,
+        ctrl_oh: Tensor,
+        tgt_oh: Tensor,
     ):
         return torch.cat(
             (
-                self.gate_1q_embedding_layer(gset_1q_oh, qubits),
-                self.gate_2q_embedding_layer(gset_2q_oh, qubits, ctrl_oh, tgt_oh),
+                self.gate_1q_embedding_layer(
+                    gset_1q_oh, qubits, self.gate_1q_pad_gate, self.gate_1q_pad_qubit
+                ),
+                self.gate_2q_embedding_layer(
+                    gset_2q_oh,
+                    qubits,
+                    ctrl_oh,
+                    tgt_oh,
+                    self.gate_2q_pad_gate,
+                    self.gate_2q_pad_qubit,
+                ),
             ),
             dim=-2,
         )
@@ -80,10 +107,12 @@ class Token_D_Embedding(nn.Module):
 
     def __init__(self, token_dims: TokenProperties) -> None:
         super().__init__()
-        self.stabilizer_row_embedding_layer = SignEmbedding(token_dims.dD)
+        self.stabilizer_sign_embedding_layer = SignEmbedding(token_dims.D_stab_sign_dim)
+        self.pad = token_dims.D_pad
 
-    def forward(self, nq: int, observation: Tensor):
-        return self.stabilizer_row_embedding_layer(nq, observation)
+    def forward(self, observation: Tensor):
+        x = self.stabilizer_sign_embedding_layer(observation)
+        return _pad_last_dim(x, self.pad)
 
 
 class Token_E_Embedding(nn.Module):
@@ -91,7 +120,9 @@ class Token_E_Embedding(nn.Module):
 
     def __init__(self, token_dims: TokenProperties) -> None:
         super().__init__()
-        self.tableau_cell_embedding = TableauCellEmbedding(token_dims.dE)
+        self.tableau_cell_embedding = TableauCellEmbedding(token_dims.E_pauli_dim)
+        self.pad_pauli = token_dims.E_pad_pauli
+        self.pad_qubit = token_dims.E_pad_qubit
 
     def forward(self, qubits: Tensor, observation: Tensor):
-        return self.tableau_cell_embedding(qubits, observation)
+        return self.tableau_cell_embedding(observation, qubits, self.pad_pauli, self.pad_qubit)
