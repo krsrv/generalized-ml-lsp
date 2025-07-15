@@ -4,9 +4,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 
-from .input import Layout, GT_1Q, GT_2Q
-from .tokens import Tokens, TokenProperties
+from .input import GT_1Q, GT_2Q, Layout
+from .tokens import TokenProperties, Tokens
 from .utils import create_oh_vectors_from_enum
+
+
+def _pad_last_dim(tensor: Tensor, pad_size: int) -> Tensor:
+    return F.pad(tensor, (0, pad_size), "constant", 0)
 
 
 def _cartesian_add(x: Tensor, y: Tensor) -> Tensor:
@@ -51,7 +55,7 @@ class PositionalEncoding(nn.Module):
     https://kazemnejad.com/blog/transformer_architecture_positional_encoding/
     """
 
-    def __init__(self, embedding_dim: int = 50) -> None:
+    def __init__(self, embedding_dim: int = 50, use_batch: bool = False) -> None:
         super().__init__()
         self.embedding_dim = embedding_dim
 
@@ -89,14 +93,16 @@ class Gate1QEmbedding(nn.Module):
         self.embedding_dim = embedding_dim
         self.layer = nn.Linear(len(GT_1Q), embedding_dim, bias=False)
 
-    def forward(self, gate_set_oh: Tensor, qubits: Tensor) -> Tensor:
+    def forward(
+        self, gate_set_oh: Tensor, qubits: Tensor, gate_padding: int, qubit_padding: int
+    ) -> Tensor:
         """Generate embeddings of each pair (Gate, Qubit) where qubit index moves first."""
         # (-1) to ensure indexing starts from 0
         weights = self.layer(F.one_hot(torch.arange(0, len(GT_1Q))).float())
-        gate_embeddings = torch.matmul(gate_set_oh.float(), weights)
-        result = _cartesian_add(
-            gate_embeddings, F.pad(qubits, (0, qubits.shape[-1]), "constant", 0)
+        gate_embeddings = _pad_last_dim(
+            torch.matmul(gate_set_oh.float(), weights), gate_padding
         )
+        result = _cartesian_add(gate_embeddings, _pad_last_dim(qubits, qubit_padding))
         return result
 
 
@@ -114,11 +120,24 @@ class Gate2QEmbedding(nn.Module):
         self.embedding_dim = embedding_dim
         self.layer = nn.Linear(len(GT_2Q), embedding_dim, bias=False)
 
-    def forward(self, gate_set_oh: Tensor, qubits: Tensor, ctrl_oh: Tensor, tgt_oh: Tensor) -> Tensor:
+    def forward(
+        self,
+        gate_set_oh: Tensor,
+        qubits: Tensor,
+        ctrl_oh: Tensor,
+        tgt_oh: Tensor,
+        gate_padding: int,
+        qubit_padding: int,
+    ) -> Tensor:
         """Generate embeddings of each pair (Gate, Qubit-Qubit) where qubit index moves first."""
         weights = self.layer(F.one_hot(torch.arange(0, len(GT_2Q))).float())
-        gate_embeddings = torch.matmul(gate_set_oh.float(), weights)
-        result = _cartesian_add(gate_embeddings, _generate_qubit_pair(qubits, ctrl_oh, tgt_oh))
+        gate_embeddings = _pad_last_dim(
+            torch.matmul(gate_set_oh.float(), weights), gate_padding
+        )
+        result = _cartesian_add(
+            gate_embeddings,
+            _pad_last_dim(_generate_qubit_pair(qubits, ctrl_oh, tgt_oh), qubit_padding),
+        )
         return result
 
 
@@ -137,7 +156,7 @@ class SignEmbedding(nn.Module):
         self.layer = nn.Linear(self.n_signs, embedding_dim, bias=False)
         self.positional_encoding = PositionalEncoding(embedding_dim)
 
-    def forward(self, nq: int, observation: Tensor) -> Tensor:
+    def forward(self, signs: Tensor) -> Tensor:
         """
         Args:
             nq: number of qubits
@@ -146,10 +165,6 @@ class SignEmbedding(nn.Module):
                 where ()_i represents the ith stabilizer, S_i represents the sign of the ith
                 stabilizer
         """
-        # if isinstance(nq, torch.Tensor):
-        #     # TODO: How can this happen?
-        #     nq = nq.item()
-        signs = torch.narrow(observation, -1, -nq, nq)
         signs_oh = F.one_hot(signs, num_classes=self.n_signs).float()
         weights = self.layer(F.one_hot(torch.arange(0, self.n_signs)).float())
         sign_embeddings = torch.matmul(signs_oh, weights)
@@ -168,17 +183,19 @@ class TableauCellEmbedding(nn.Module):
         self.layer = nn.Linear(self.n_paulis, embedding_dim, bias=False)
         self.positional_encoding = PositionalEncoding(embedding_dim)
 
-    def forward(self, qubits: Tensor, observation: Tensor) -> Tensor:
+    def forward(
+        self, paulis: Tensor, qubits: Tensor, pauli_padding: int, qubit_padding: int
+    ) -> Tensor:
         nq = qubits.shape[-2]
         # Map the Paulis as follow: 0 -> I, 1 -> X, 2 -> Y, 3 -> Z
-        paulis = torch.narrow(observation, -1, 0, nq * nq) + 2 * torch.narrow(
-            observation, -1, nq * nq, nq * nq
-        )
         # paulis = paulis[..., 0:nq * nq] + paulis[..., nq * nq:]
         paulis_oh = F.one_hot(paulis, num_classes=self.n_paulis)
         weights = self.layer(F.one_hot(torch.arange(0, self.n_paulis)).float())
-        pauli_embeddings = torch.matmul(paulis_oh.float(), weights)
-        qubits = qubits.unsqueeze(-3)  # Shape: (1, nq, d)
+        pauli_embeddings = _pad_last_dim(
+            torch.matmul(paulis_oh.float(), weights), pauli_padding
+        )
+        qubits = _pad_last_dim(qubits, qubit_padding)
+        qubits = qubits.unsqueeze(-3)  # Shape: (1, nq, d)gun
         qubits = qubits.expand(*qubits.shape[:-3], nq, nq, -1)  # Shape: (nq, nq, d)
         qubits = qubits.reshape(*qubits.shape[:-3], nq * nq, -1, 1)
         qubits = qubits.squeeze(-1)
@@ -190,7 +207,7 @@ class DepthProjectionLayer(nn.Module):
         super().__init__()
         self.depth_prediction_layer = nn.Linear(token_dim.dA, 1)
 
-    def forward(self, x: Tensor) -> Tensor:
+    def forward(self, x: Tensor, mask: Tensor) -> Tensor:
         return torch.squeeze(self.depth_prediction_layer(x), -1).squeeze(-1)
 
 
@@ -200,9 +217,10 @@ class GateProjectionLayer(nn.Module):
         self.gate_prediction_layer = nn.Linear(token_dim.dC, 1)
         self.softmax = nn.Softmax(-1)
 
-    def forward(self, x: Tensor) -> Tensor:
+    def forward(self, x: Tensor, mask: Tensor) -> Tensor:
         weights = torch.squeeze(self.gate_prediction_layer(x), -1)
-        return self.softmax(weights)
+        weights_masked = weights.masked_fill(~mask.bool(), float("-inf"))
+        return self.softmax(weights_masked)
 
 
 class ResidualLayer(nn.Module):
