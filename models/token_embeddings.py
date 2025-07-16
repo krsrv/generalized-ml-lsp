@@ -3,18 +3,19 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 
-from .input import Layout, GT_1Q, GT_2Q
-from .tokens import TokenProperties
 from .embeddings import (
+    GateEmbedding,
     PositionalEncoding,
-    Gate1QEmbedding,
-    Gate2QEmbedding,
     SignEmbedding,
     TableauCellEmbedding,
 )
+from .input import GT_1Q, GT_2Q, Layout
+from .tokens import TokenProperties
+
 
 def _pad_last_dim(tensor: Tensor, pad_size: int) -> Tensor:
     return F.pad(tensor, (0, pad_size), "constant", 0)
+
 
 class Token_A_Embedding(nn.Module):
     """Global token representing the graph. It is the (truncated) eigenvalue list of the graph
@@ -68,38 +69,10 @@ class Token_C_Embedding(nn.Module):
 
     def __init__(self, token_dims: TokenProperties) -> None:
         super().__init__()
-        self.gate_1q_embedding_layer = Gate1QEmbedding(token_dims.C_gt_1q_dim)
-        self.gate_2q_embedding_layer = Gate2QEmbedding(token_dims.C_gt_2q_dim)
+        self.gate_embedding_layer = GateEmbedding(token_dims.C_gt_1q_dim)
 
-        self.gate_1q_pad_gate = token_dims.C_pad_gt_1q_gate
-        self.gate_1q_pad_qubit = token_dims.C_pad_gt_1q_qubit
-        self.gate_2q_pad_gate = token_dims.C_pad_gt_2q_gate
-        self.gate_2q_pad_qubit = token_dims.C_pad_gt_2q_qubit
-
-    def forward(
-        self,
-        gset_1q_oh: Tensor,
-        gset_2q_oh: Tensor,
-        qubits: Tensor,
-        ctrl_oh: Tensor,
-        tgt_oh: Tensor,
-    ):
-        return torch.cat(
-            (
-                self.gate_1q_embedding_layer(
-                    gset_1q_oh, qubits, self.gate_1q_pad_gate, self.gate_1q_pad_qubit
-                ),
-                self.gate_2q_embedding_layer(
-                    gset_2q_oh,
-                    qubits,
-                    ctrl_oh,
-                    tgt_oh,
-                    self.gate_2q_pad_gate,
-                    self.gate_2q_pad_qubit,
-                ),
-            ),
-            dim=-2,
-        )
+    def forward(self, gates_oh: Tensor, gate_qubits_oh: Tensor, qubits: Tensor):
+        return self.gate_embedding_layer(gates_oh, gate_qubits_oh, qubits)
 
 
 class Token_D_Embedding(nn.Module):
@@ -108,11 +81,9 @@ class Token_D_Embedding(nn.Module):
     def __init__(self, token_dims: TokenProperties) -> None:
         super().__init__()
         self.stabilizer_sign_embedding_layer = SignEmbedding(token_dims.D_stab_sign_dim)
-        self.pad = token_dims.D_pad
 
     def forward(self, observation: Tensor):
-        x = self.stabilizer_sign_embedding_layer(observation)
-        return _pad_last_dim(x, self.pad)
+        return self.stabilizer_sign_embedding_layer(observation)
 
 
 class Token_E_Embedding(nn.Module):
@@ -121,8 +92,6 @@ class Token_E_Embedding(nn.Module):
     def __init__(self, token_dims: TokenProperties) -> None:
         super().__init__()
         self.tableau_cell_embedding = TableauCellEmbedding(token_dims.E_pauli_dim)
-        self.pad_pauli = token_dims.E_pad_pauli
-        self.pad_qubit = token_dims.E_pad_qubit
 
     def forward(self, qubits: Tensor, observation: Tensor):
-        return self.tableau_cell_embedding(observation, qubits, self.pad_pauli, self.pad_qubit)
+        return self.tableau_cell_embedding(observation, qubits)
