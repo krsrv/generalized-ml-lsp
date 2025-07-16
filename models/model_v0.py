@@ -85,14 +85,9 @@ class ModelV0(nn.Module):
         self,
         graph_eigvals: Tensor,
         graph_eigvecs: Tensor,
-        ctrl_oh: Tensor,
-        tgt_oh: Tensor,
-        gate_set_1q_oh: Tensor,
-        gate_set_2q_oh: Tensor,
-        observation_paulis: Tensor,
-        observation_signs: Tensor,
-        n_mask: Tensor,
-        gate_mask: Tensor,
+        gates_oh: Tensor,
+        gate_qubit_oh: Tensor,
+        observation: Tensor,
     ) -> tuple[Tensor, Tensor]:
         """
         The first parameter defines the number of qubits. The next 4 define the layout. The next 2
@@ -122,12 +117,13 @@ class ModelV0(nn.Module):
         # components then.
         qubit_tensors = self.token_B_embedding(graph_eigvecs)
         # Token C
-        gate_tensors = self.token_C_embedding(
-            gate_set_1q_oh, gate_set_2q_oh, qubit_tensors, ctrl_oh, tgt_oh
-        )
+        gate_tensors = self.token_C_embedding(gates_oh, gate_qubit_oh, qubit_tensors)
         # Token D
+        n = graph_eigvals.shape[-1]
+        observation_signs = torch.narrow(observation, -1, 2 * n * n, n).long()
         sign_tensors = self.token_D_embedding(observation_signs)
         # Token E
+        observation_paulis = torch.narrow(observation, -1, 0, 2 * n * n).long()
         tableau_cell_tensors = self.token_E_embedding(qubit_tensors, observation_paulis)
 
         x = Tokens(
@@ -142,6 +138,4 @@ class ModelV0(nn.Module):
             x = self.residual_layer(x, attention_output)
             computation_layer = self.computation_layer[i](x)
             x = self.residual_layer(x, computation_layer)
-        return self.gate_projection_layer(x.C, gate_mask), self.depth_projection_layer(
-            x.A, n_mask
-        )
+        return self.gate_projection_layer(x.C), self.depth_projection_layer(x.A)

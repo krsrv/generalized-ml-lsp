@@ -79,8 +79,8 @@ class PositionalEncoding(nn.Module):
         return output
 
 
-class Gate1QEmbedding(nn.Module):
-    """Learnt embeddings for each 1-qubit gate type. It implicitly makes use of the properties of
+class GateEmbedding(nn.Module):
+    """Learnt embeddings for each gate type. It implicitly makes use of the properties of
     the Enum GT_1Q, which means the model would need to be retrained if it is tweaked.
 
     Given an input gate set of size G and n qubits (tensor size (n, q_embedding_dim)) the output will
@@ -91,54 +91,29 @@ class Gate1QEmbedding(nn.Module):
         super().__init__()
         # Use nn.Linear for proper initialization.
         self.embedding_dim = embedding_dim
-        self.layer = nn.Linear(len(GT_1Q), embedding_dim, bias=False)
+        self.num_classes = len(GT_1Q) + len(GT_2Q)
+        self.layer = nn.Linear(self.num_classes, embedding_dim, bias=False)
 
     def forward(
-        self, gate_set_oh: Tensor, qubits: Tensor, gate_padding: int, qubit_padding: int
+        self, gates_oh: Tensor, gate_qubit_oh: Tensor, qubits: Tensor
     ) -> Tensor:
         """Generate embeddings of each pair (Gate, Qubit) where qubit index moves first."""
         # (-1) to ensure indexing starts from 0
-        weights = self.layer(F.one_hot(torch.arange(0, len(GT_1Q))).float())
-        gate_embeddings = _pad_last_dim(
-            torch.matmul(gate_set_oh.float(), weights), gate_padding
+        gate_weights = self.layer(F.one_hot(torch.arange(0, self.num_classes)).float())
+        gate_embeddings = torch.matmul(gates_oh.float(), gate_weights)
+
+        gate_qubit_oh = gate_qubit_oh.reshape(
+            *gate_qubit_oh.shape[:-1], 2, gate_qubit_oh.shape[-1] // 2
         )
-        result = _cartesian_add(gate_embeddings, _pad_last_dim(qubits, qubit_padding))
-        return result
-
-
-class Gate2QEmbedding(nn.Module):
-    """Learnt embeddings for each 2-qubit gate type. It implicitly makes use of the properties of
-    the Enum GT_2Q, which means the model would need to be retrained if it is tweaked.
-
-    Given an input gate set of size G, n qubits (tensor size (n, q_embedding_dim)), and a layout with
-    E edges, the output will be a tensor of size (E * G, embedding_dim)
-    """
-
-    def __init__(self, embedding_dim: int = 60) -> None:
-        super().__init__()
-        # Use nn.Linear for proper initialization.
-        self.embedding_dim = embedding_dim
-        self.layer = nn.Linear(len(GT_2Q), embedding_dim, bias=False)
-
-    def forward(
-        self,
-        gate_set_oh: Tensor,
-        qubits: Tensor,
-        ctrl_oh: Tensor,
-        tgt_oh: Tensor,
-        gate_padding: int,
-        qubit_padding: int,
-    ) -> Tensor:
-        """Generate embeddings of each pair (Gate, Qubit-Qubit) where qubit index moves first."""
-        weights = self.layer(F.one_hot(torch.arange(0, len(GT_2Q))).float())
-        gate_embeddings = _pad_last_dim(
-            torch.matmul(gate_set_oh.float(), weights), gate_padding
+        qubits = qubits.unsqueeze(-3)
+        qubits = qubits.expand(
+            *qubits.shape[:-3], gate_qubit_oh.shape[-3], *qubits.shape[-2:]
         )
-        result = _cartesian_add(
-            gate_embeddings,
-            _pad_last_dim(_generate_qubit_pair(qubits, ctrl_oh, tgt_oh), qubit_padding),
+        qubit_embeddings = torch.matmul(gate_qubit_oh.float(), qubits)
+        qubit_embeddings = qubit_embeddings.reshape(
+            *qubit_embeddings.shape[:-2], qubit_embeddings.shape[-1] * 2
         )
-        return result
+        return gate_embeddings + qubit_embeddings
 
 
 class SignEmbedding(nn.Module):
@@ -183,18 +158,16 @@ class TableauCellEmbedding(nn.Module):
         self.layer = nn.Linear(self.n_paulis, embedding_dim, bias=False)
         self.positional_encoding = PositionalEncoding(embedding_dim)
 
-    def forward(
-        self, paulis: Tensor, qubits: Tensor, pauli_padding: int, qubit_padding: int
-    ) -> Tensor:
+    def forward(self, paulis: Tensor, qubits: Tensor) -> Tensor:
         nq = qubits.shape[-2]
         # Map the Paulis as follow: 0 -> I, 1 -> X, 2 -> Y, 3 -> Z
         # paulis = paulis[..., 0:nq * nq] + paulis[..., nq * nq:]
+        paulis = torch.narrow(paulis, -1, 0, nq * nq) + torch.narrow(
+            paulis, -1, nq * nq, nq * nq
+        )
         paulis_oh = F.one_hot(paulis, num_classes=self.n_paulis)
         weights = self.layer(F.one_hot(torch.arange(0, self.n_paulis)).float())
-        pauli_embeddings = _pad_last_dim(
-            torch.matmul(paulis_oh.float(), weights), pauli_padding
-        )
-        qubits = _pad_last_dim(qubits, qubit_padding)
+        pauli_embeddings = torch.matmul(paulis_oh.float(), weights)
         qubits = qubits.unsqueeze(-3)  # Shape: (1, nq, d)gun
         qubits = qubits.expand(*qubits.shape[:-3], nq, nq, -1)  # Shape: (nq, nq, d)
         qubits = qubits.reshape(*qubits.shape[:-3], nq * nq, -1, 1)
@@ -207,7 +180,7 @@ class DepthProjectionLayer(nn.Module):
         super().__init__()
         self.depth_prediction_layer = nn.Linear(token_dim.dA, 1)
 
-    def forward(self, x: Tensor, mask: Tensor) -> Tensor:
+    def forward(self, x: Tensor) -> Tensor:
         return torch.squeeze(self.depth_prediction_layer(x), -1).squeeze(-1)
 
 
@@ -217,10 +190,8 @@ class GateProjectionLayer(nn.Module):
         self.gate_prediction_layer = nn.Linear(token_dim.dC, 1)
         self.softmax = nn.Softmax(-1)
 
-    def forward(self, x: Tensor, mask: Tensor) -> Tensor:
-        weights = torch.squeeze(self.gate_prediction_layer(x), -1)
-        weights_masked = weights.masked_fill(~mask.bool(), float("-inf"))
-        return self.softmax(weights_masked)
+    def forward(self, x: Tensor) -> Tensor:
+        return self.softmax(torch.squeeze(self.gate_prediction_layer(x), -1))
 
 
 class ResidualLayer(nn.Module):
