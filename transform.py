@@ -191,10 +191,10 @@ def create_h5_file(map_data, folder, file):
     if not os.path.exists(output_file):
         f = h5py.File(output_file, "w")
         f.close()
-    else:
-        os.remove(output_file)
-        f = h5py.File(output_file, "w")
-        f.close()
+    # else:
+    #     os.remove(output_file)
+    #     f = h5py.File(output_file, "w")
+    #     f.close()
 
     for k, v in map_data.items():
         n, g = k
