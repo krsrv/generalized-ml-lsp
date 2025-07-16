@@ -3,6 +3,7 @@ import os
 import pickle
 from typing import Any
 
+import h5py
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -12,6 +13,89 @@ from torch.utils.data.dataset import Dataset
 from models.input import GT_1Q, GT_2Q
 from models.utils import create_oh_vectors_from_enum
 from training.instance import TrainingInstance
+
+"""
+Focus:
+Duck goes quaaaaack
+Want to work with hdf5 files
+"""
+
+
+def _transform_graph(adjacency_matrix):
+    """
+    Transform an adjacency matrix to a laplacian matrix and return the eigenvalues, eigenvectors
+    """
+    n = adjacency_matrix.shape[2]
+    laplacian = np.array(adjacency_matrix, dtype=np.int32)
+    diagonals = -np.sum(laplacian, axis=2)
+    laplacian = laplacian + diagonals[:, None, :] * np.eye(n)[None, :, :]
+    return np.linalg.eigh(laplacian)
+
+
+class UnprepHdf5Dataloader:
+    def __init__(self, folder):
+        super().__init__()
+        self.folder = folder
+        self.load_files(folder)
+        self.construct_metadata(folder)
+
+    def load_files(self, folder):
+        self.files = []
+        for file in os.listdir(folder):
+            if not file.endswith(".hdf5"):
+                continue
+            self.files.append(h5py.File(f"{folder}/{file}", "r"))
+
+    def construct_metadata(self, folder):
+        self.ng_list = list()
+        self.size_list = list()
+        self.ng_map = dict()
+        for i, file in enumerate(self.files):
+            for n in file:
+                for g in file[n]:
+                    key = (int(n), int(g))
+                    self.ng_map[key] = i
+                    self.ng_list.append(key)
+                    self.size_list.append(file[n][g]["layout"].shape[0])
+        self.size_list = np.array(self.size_list)
+        self.p = self.size_list / np.sum(self.size_list)
+
+    def sample_ng(self):
+        idx = np.random.choice(np.arange(len(self.ng_list)), p=self.p)
+        return self.ng_list[idx]
+
+    def sample_data(self, n, g, batch_size=8):
+        data = self.files[self.ng_map[(n, g)]][str(n)][str(g)]
+        n_samples = data["layout"].shape[0]
+        assert (
+            n_samples > batch_size
+        ), f"Number of training samples ({n_samples}) is less than the batch size ({batch_size})"
+        idxs = np.sort(
+            np.random.choice(np.arange(0, n_samples), batch_size, replace=False)
+        )
+        eval, evec = _transform_graph(data["layout"][idxs, :, :])
+        return {
+            "eigval": eval,
+            "eigvec": evec,
+            "gate_oh": data["gate_oh"][idxs, :, :],
+            "gate_qubit_oh": data["gate_qubit_oh"][idxs, :, :],
+            "observation": data["observation"][idxs, :],
+            "gate": data["gate"][idxs],
+            "depth": data["depth"][idxs],
+        }
+
+    def __len__(self):
+        return len(self.ng_list)
+
+    def __getitem__(self, index):
+        n, g, index = index
+        data = self.files[self.ng_map[(n, g)]][str(n)][str(g)]
+        return data["layout"][index, :, :]
+
+
+"""
+pkl file
+"""
 
 
 def construct_metadata(folder: str) -> dict:
