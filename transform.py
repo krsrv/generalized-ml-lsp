@@ -15,6 +15,7 @@ from torch.utils.data.dataset import Dataset
 
 from models.input import GT_1Q, GT_2Q
 from training.dataset import TrainingInstance
+from training.utils import prepare_hdf5_dataset, write_to_file
 
 """
 Utility functions for creating gate embeddings
@@ -89,73 +90,6 @@ class RawData(Dataset):
 
 
 """
-HDF5 file handling functions
-"""
-
-
-def prepare_hdf5_dataset(output_file, n, g, size):
-    key = f"{n}/{g}"
-    gate_oh_size = len(GT_1Q) + len(GT_2Q)
-    with h5py.File(output_file, "a") as f:
-        f.create_dataset(
-            f"{key}/n", shape=(0,), maxshape=(None,), dtype="int64", chunks=True
-        )
-        f.create_dataset(
-            f"{key}/layout",
-            shape=(0, n, n),
-            maxshape=(None, n, n),
-            dtype="bool",
-            chunks=True,
-        )
-        f.create_dataset(
-            f"{key}/gate_oh",
-            shape=(0, g, gate_oh_size),
-            maxshape=(None, g, gate_oh_size),
-            dtype="bool",
-            chunks=True,
-        )
-        f.create_dataset(
-            f"{key}/gate_qubit_oh",
-            shape=(0, g, 2 * n),
-            maxshape=(None, g, 2 * n),
-            dtype="bool",
-            chunks=True,
-        )
-        f.create_dataset(
-            f"{key}/depth", shape=(0,), maxshape=(None,), dtype="int64", chunks=True
-        )
-        f.create_dataset(
-            f"{key}/gate", shape=(0,), maxshape=(None,), dtype="int64", chunks=True
-        )
-        f.create_dataset(
-            f"{key}/observation",
-            shape=(0, 2 * n * n + n),
-            maxshape=(None, 2 * n * n + n),
-            dtype="bool",
-            chunks=True,
-        )
-
-
-def write_to_file(dict_obj, output_file, key, size):
-    with h5py.File(output_file, "a") as f:
-        for k, v in dict_obj.items():
-            dset: h5py.Dataset = f[f"{key}/{k}"]
-            old_size = dset.shape[0]
-            if type(v) != np.ndarray:
-                v = np.array(v)
-            new_size = old_size + v.shape[0]
-            dset.resize((new_size, *dset.shape[1:]))
-            try:
-                if len(dset.shape) == 3:
-                    dset[old_size:new_size, :, :] = v
-                elif len(dset.shape) == 2:
-                    dset[old_size:new_size, :] = v
-            except Exception as e:
-                print(k, v)
-                raise e
-
-
-"""
 Main functions
 """
 
@@ -205,7 +139,7 @@ def create_h5_file(map_data, folder, file):
         dump_object = new_dump_object()
         key = f"{n}/{g}"
 
-        prepare_hdf5_dataset(output_file, n, g, size)
+        prepare_hdf5_dataset(output_file, n, g)
         for i in range(size):
             data = ng_dataset[i]
             dump_object["n"].append(data.n)
@@ -232,10 +166,10 @@ def create_h5_file(map_data, folder, file):
             dump_object["observation"].append(observation)
 
             if i % 100 == 0:
-                write_to_file(dump_object, output_file, key, 100)
+                write_to_file(dump_object, output_file, key)
                 dump_object = new_dump_object()
 
-        write_to_file(dump_object, output_file, key, size % 100)
+        write_to_file(dump_object, output_file, key)
 
 
 if __name__ == "__main__":
@@ -245,7 +179,7 @@ if __name__ == "__main__":
         create_h5_file(data, output_folder, file)
 
     folders = [
-        "/Users/tport/Desktop/USC/Semesters/Projects/LSP/sllsp/training-data/main-25-07-07-2",
+        "/Users/tport/Desktop/USC/Semesters/Projects/LSP/sllsp/training-data/main-25-07-07-1",
         # "/scratch1/sauravk/lsp-raw-training-data"
     ]
     ng_data = read_raw_data(folders)
@@ -278,5 +212,5 @@ if __name__ == "__main__":
         import time
 
         tic = time.time()
-        worker(ng_data, output_folder, "25-07-07-2.hdf5")
+        worker(ng_data, output_folder, "25-07-07-1.hdf5")
         print("Time elapsed:", time.time() - tic)
