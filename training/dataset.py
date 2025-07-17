@@ -7,7 +7,6 @@ import h5py
 import numpy as np
 import torch
 import torch.nn.functional as F
-from fsspec import filesystem
 from torch.masked import masked_tensor
 from torch.utils.data.dataset import Dataset
 
@@ -34,14 +33,14 @@ def _transform_graph(adjacency_matrix):
 
 
 class UnprepHdf5Dataloader:
-    def __init__(self, files: str):
+    def __init__(self, files: list[str]):
         super().__init__()
         self.load_files(files)
         self.construct_metadata()
 
     def load_files(self, files):
         self.files = []
-        for file in filesystem:
+        for file in files:
             if not file.endswith(".hdf5"):
                 continue
             self.files.append(h5py.File(file, "r"))
