@@ -33,38 +33,37 @@ def _transform_graph(adjacency_matrix):
 
 
 class UnprepHdf5Dataloader:
-    def __init__(self, files: list[str]):
+    def __init__(self, file: str):
         super().__init__()
-        self.load_files(files)
+        self.load_files(file)
         self.construct_metadata()
 
-    def load_files(self, files):
-        self.files = []
-        for file in files:
-            if not file.endswith(".hdf5"):
-                continue
-            self.files.append(h5py.File(file, "r"))
+    def load_files(self, file):
+        self.file = h5py.File(file, "r")
 
     def construct_metadata(self):
-        self.ng_list = list()
-        self.size_list = list()
-        self.ng_map = dict()
-        for i, file in enumerate(self.files):
-            for n in file:
-                for g in file[n]:
-                    key = (int(n), int(g))
-                    self.ng_map[key] = i
-                    self.ng_list.append(key)
-                    self.size_list.append(file[n][g]["layout"].shape[0])
-        self.size_list = np.array(self.size_list)
+        # To support multiple files, look at the module training.split for inspiration.
+        self.per_file_metadata = {}
+        self.aggregate_metadata = {}
+        self.reverse_map = {}
+        total = 0
+        file = self.file
+        for n in file.keys():
+            for g in file[n].keys():
+                size = file[n][g]["n"].shape[0]
+                total += size
+                self.aggregate_metadata[(int(n), int(g))] = size
+        self.size_list = np.array([v for v in self.aggregate_metadata.values()])
         self.p = self.size_list / np.sum(self.size_list)
 
-    def sample_ng(self):
-        idx = np.random.choice(np.arange(len(self.ng_list)), p=self.p)
+        self.ng_list = list(self.aggregate_metadata.keys())
+
+    def random_sample_ng(self):
+        idx = np.random.choice(np.arange(len(self.aggregate_metadata)), p=self.p)
         return self.ng_list[idx]
 
-    def sample_data(self, n, g, batch_size=8):
-        data = self.files[self.ng_map[(n, g)]][str(n)][str(g)]
+    def random_sample_data(self, n, g, batch_size=8):
+        data: h5py.Group = self.file[f"{n}/{g}"]
         n_samples = data["layout"].shape[0]
         assert (
             n_samples > batch_size
@@ -82,6 +81,52 @@ class UnprepHdf5Dataloader:
             "gate": data["gate"][idxs],
             "depth": data["depth"][idxs],
         }
+
+    def __iter__(self):
+        self.ng_iter_idx = 0
+        self.batch_idx = 0
+        self.batch_size = 64
+        return self
+
+    def __next__(self):
+        if self.ng_iter_idx >= len(self.ng_list):
+            raise StopIteration
+
+        # Extract the current (n, g) key
+        n, g = self.ng_list[self.ng_iter_idx]
+        max_size = self.aggregate_metadata[(n, g)]
+        while max_size == 0:
+            self.ng_iter_idx += 1
+            if self.ng_iter_idx >= len(self.ng_list):
+                raise StopIteration
+            n, g = self.ng_list[self.ng_iter_idx]
+            max_size = self.aggregate_metadata[(n, g)]
+
+        # Set the start and end indices
+        if self.batch_idx + self.batch_size > max_size:
+            start_idx, end_idx = self.batch_idx, max_size
+            self.batch_idx = 0
+            self.ng_iter_idx += 1
+        else:
+            start_idx, end_idx = self.batch_idx, self.batch_idx + self.batch_size
+            self.batch_idx = end_idx
+
+        # Return the data
+        data = self.file[f"{n}/{g}"]
+        eval, evec = _transform_graph(data["layout"][start_idx:end_idx, :, :])
+        object = {
+            "eigval": eval,
+            "eigvec": evec,
+            "gate_oh": data["gate_oh"][start_idx:end_idx, :, :],
+            "gate_qubit_oh": data["gate_qubit_oh"][start_idx:end_idx, :, :],
+            "observation": data["observation"][start_idx:end_idx, :],
+            "gate": data["gate"][start_idx:end_idx],
+            "depth": data["depth"][start_idx:end_idx],
+        }
+        return object
+
+    def get_total_size(self):
+        return np.sum(self.size_list)
 
     def __len__(self):
         return len(self.ng_list)
