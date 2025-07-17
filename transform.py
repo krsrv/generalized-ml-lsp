@@ -98,39 +98,39 @@ def prepare_hdf5_dataset(output_file, n, g, size):
     gate_oh_size = len(GT_1Q) + len(GT_2Q)
     with h5py.File(output_file, "a") as f:
         f.create_dataset(
-            f"{key}/n", shape=(0,), maxshape=(size,), dtype="int64", chunks=True
+            f"{key}/n", shape=(0,), maxshape=(None,), dtype="int64", chunks=True
         )
         f.create_dataset(
             f"{key}/layout",
             shape=(0, n, n),
-            maxshape=(size, n, n),
+            maxshape=(None, n, n),
             dtype="bool",
             chunks=True,
         )
         f.create_dataset(
             f"{key}/gate_oh",
             shape=(0, g, gate_oh_size),
-            maxshape=(size, g, gate_oh_size),
+            maxshape=(None, g, gate_oh_size),
             dtype="bool",
             chunks=True,
         )
         f.create_dataset(
             f"{key}/gate_qubit_oh",
             shape=(0, g, 2 * n),
-            maxshape=(size, g, 2 * n),
+            maxshape=(None, g, 2 * n),
             dtype="bool",
             chunks=True,
         )
         f.create_dataset(
-            f"{key}/depth", shape=(0,), maxshape=(size,), dtype="int64", chunks=True
+            f"{key}/depth", shape=(0,), maxshape=(None,), dtype="int64", chunks=True
         )
         f.create_dataset(
-            f"{key}/gate", shape=(0,), maxshape=(size,), dtype="int64", chunks=True
+            f"{key}/gate", shape=(0,), maxshape=(None,), dtype="int64", chunks=True
         )
         f.create_dataset(
             f"{key}/observation",
             shape=(0, 2 * n * n + n),
-            maxshape=(size, 2 * n * n + n),
+            maxshape=(None, 2 * n * n + n),
             dtype="bool",
             chunks=True,
         )
@@ -144,7 +144,7 @@ def write_to_file(dict_obj, output_file, key, size):
             if type(v) != np.ndarray:
                 v = np.array(v)
             new_size = old_size + v.shape[0]
-            # dset.resize((new_size, *dset.shape[1:]))
+            dset.resize((new_size, *dset.shape[1:]))
             try:
                 if len(dset.shape) == 3:
                     dset[old_size:new_size, :, :] = v
