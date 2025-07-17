@@ -103,7 +103,7 @@ class UnprepHdf5Dataloader:
             max_size = self.aggregate_metadata[(n, g)]
 
         # Set the start and end indices
-        if self.batch_idx + self.batch_size > max_size:
+        if self.batch_idx + self.batch_size >= max_size:
             start_idx, end_idx = self.batch_idx, max_size
             self.batch_idx = 0
             self.ng_iter_idx += 1
