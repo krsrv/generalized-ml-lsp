@@ -58,15 +58,19 @@ class UnprepHdf5Dataloader:
 
         self.ng_list = list(self.aggregate_metadata.keys())
 
-    def random_sample_ng(self):
-        idx = np.random.choice(np.arange(len(self.aggregate_metadata)), p=self.p)
+    def random_sample_ng(self, batch_size=64):
+        size = 0
+        while size < batch_size:
+            idx = np.random.choice(np.arange(len(self.aggregate_metadata)), p=self.p)
+            n, g = self.ng_list[idx]
+            size = self.file[f"{n}/{g}"]["layout"].shape[0]
         return self.ng_list[idx]
 
-    def random_sample_data(self, n, g, batch_size=8):
+    def random_sample_data(self, n, g, batch_size=64):
         data: h5py.Group = self.file[f"{n}/{g}"]
         n_samples = data["layout"].shape[0]
         assert (
-            n_samples > batch_size
+            n_samples >= batch_size
         ), f"Number of training samples ({n_samples}) is less than the batch size ({batch_size})"
         idxs = np.sort(
             np.random.choice(np.arange(0, n_samples), batch_size, replace=False)
