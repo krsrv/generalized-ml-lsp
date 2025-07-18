@@ -71,7 +71,7 @@ class PositionalEncoding(nn.Module):
             0
         )  # 1 / 10000 ^ (2i/d)
 
-        output = torch.zeros((n, self.embedding_dim))
+        output = torch.zeros((n, self.embedding_dim)).to(x.device)
         # PE(k, 2i) = sin(k / 10000^(2i / d))
         output[:, 0::2] = torch.sin(numtr * dentr)
         # PE(k, 2i+1) = cos(k / 10000^(2i / d))
@@ -98,8 +98,11 @@ class GateEmbedding(nn.Module):
         self, gates_oh: Tensor, gate_qubit_oh: Tensor, qubits: Tensor
     ) -> Tensor:
         """Generate embeddings of each pair (Gate, Qubit) where qubit index moves first."""
+        device = qubits.device
         # (-1) to ensure indexing starts from 0
-        gate_weights = self.layer(F.one_hot(torch.arange(0, self.num_classes)).float())
+        gate_weights = self.layer(
+            F.one_hot(torch.arange(0, self.num_classes)).to(device).float()
+        )
         gate_embeddings = torch.matmul(gates_oh.float(), gate_weights)
 
         gate_qubit_oh = gate_qubit_oh.reshape(
@@ -140,7 +143,8 @@ class SignEmbedding(nn.Module):
                 where ()_i represents the ith stabilizer, S_i represents the sign of the ith
                 stabilizer
         """
-        signs_oh = F.one_hot(signs, num_classes=self.n_signs).float()
+        device = signs.device
+        signs_oh = F.one_hot(signs, num_classes=self.n_signs).to(device).float()
         weights = self.layer(F.one_hot(torch.arange(0, self.n_signs)).float())
         sign_embeddings = torch.matmul(signs_oh, weights)
         return sign_embeddings + self.positional_encoding(sign_embeddings)
@@ -165,8 +169,11 @@ class TableauCellEmbedding(nn.Module):
         paulis = torch.narrow(paulis, -1, 0, nq * nq) + torch.narrow(
             paulis, -1, nq * nq, nq * nq
         )
-        paulis_oh = F.one_hot(paulis, num_classes=self.n_paulis)
-        weights = self.layer(F.one_hot(torch.arange(0, self.n_paulis)).float())
+        device = qubits.device
+        paulis_oh = F.one_hot(paulis, num_classes=self.n_paulis).to(device)
+        weights = self.layer(
+            F.one_hot(torch.arange(0, self.n_paulis)).to(device).float()
+        )
         pauli_embeddings = torch.matmul(paulis_oh.float(), weights)
         qubits = qubits.unsqueeze(-3)  # Shape: (1, nq, d)gun
         qubits = qubits.expand(*qubits.shape[:-3], nq, nq, -1)  # Shape: (nq, nq, d)
