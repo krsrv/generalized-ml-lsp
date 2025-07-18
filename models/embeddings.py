@@ -145,7 +145,9 @@ class SignEmbedding(nn.Module):
         """
         device = signs.device
         signs_oh = F.one_hot(signs, num_classes=self.n_signs).to(device).float()
-        weights = self.layer(F.one_hot(torch.arange(0, self.n_signs)).float())
+        weights = self.layer(
+            F.one_hot(torch.arange(0, self.n_signs)).to(device).float()
+        )
         sign_embeddings = torch.matmul(signs_oh, weights)
         return sign_embeddings + self.positional_encoding(sign_embeddings)
 
