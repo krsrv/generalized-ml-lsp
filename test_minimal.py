@@ -43,6 +43,10 @@ class Trainer:
         self.train_data = UnprepHdf5Dataloader(train_file)
         self.validation_data = UnprepHdf5Dataloader(validation_file)
         self.test_data = UnprepHdf5Dataloader(test_file)
+        print("Total sizes of datasets:")
+        print(f"Train - {self.train_data.get_total_size()}")
+        print(f"Validation - {self.validation_data.get_total_size()}")
+        print(f"Test - {self.test_data.get_total_size()}")
 
         self.batch_size = 64
 
@@ -69,8 +73,11 @@ class Trainer:
         return gate_prediction, depth_prediction
 
     def set_device(self):
+        if hasattr(self, "device") and self.device is not None:
+            return
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        print(f"Device is {self.device}")
+        self.model.to(self.device)
+        print(f"Model now on device={self.device}")
 
     def train(self, epochs=1):
         self.set_device()
@@ -113,6 +120,7 @@ class Trainer:
             self.dump_loss_history(training_loss_history)
 
     def calculate_validation_score(self):
+        self.set_device()
         total_loss = 0.0
         total_samples = 0
         for data in iter(self.validation_data):
@@ -196,4 +204,9 @@ if __name__ == "__main__":
         lr=args.lr,
         betas=(args.beta1, args.beta2),
     )
+    tic = time.time()
+    loss = trainer.calculate_validation_score()
+    toc = time.time()
+    print(f"Initial validation loss = {loss} ({toc-tic} s)")
     trainer.train(epochs=args.epochs)
+    print("Training complete")

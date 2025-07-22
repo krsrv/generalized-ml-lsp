@@ -41,8 +41,22 @@ class Trainer:
         self.optimizer = optim.Adam(self.model.parameters(), lr=lr, betas=betas)
 
         self.train_data = UnprepHdf5Dataloader(train_file)
-        self.validation_data = UnprepHdf5Dataloader(validation_file)
-        self.test_data = UnprepHdf5Dataloader(test_file)
+        self.validation_data = (
+            UnprepHdf5Dataloader(validation_file)
+            if validation_file is not None
+            else None
+        )
+        self.test_data = (
+            UnprepHdf5Dataloader(test_file) if test_file is not None else None
+        )
+        print("Total sizes of datasets:")
+        print(f"Train - {self.train_data.get_total_size()}")
+        print(
+            f"Validation - {self.validation_data.get_total_size() if self.validation_data is not None else 0}"
+        )
+        print(
+            f"Test - {self.test_data.get_total_size() if self.test_data is not None else 0}"
+        )
 
         self.batch_size = 64
 
@@ -57,8 +71,10 @@ class Trainer:
             gate_prediction, true_gates
         ) + self.alpha * self.depth_loss(depth_prediction, true_depth.float())
 
-    def run_model(self, data, use_grad=True):
+    def run_model(self, data, use_grad=True, use_eval=False):
         with torch.set_grad_enabled(use_grad):
+            if use_eval:
+                self.model.eval()
             gate_prediction, depth_prediction = self.model.forward(
                 torch.tensor(data["eigval"], dtype=torch.float).to(self.device),
                 torch.tensor(data["eigvec"], dtype=torch.float).to(self.device),
@@ -66,15 +82,19 @@ class Trainer:
                 torch.tensor(data["gate_qubit_oh"], dtype=torch.bool).to(self.device),
                 torch.tensor(data["observation"], dtype=torch.bool).to(self.device),
             )
+            if use_eval:
+                self.model.train()
         return gate_prediction, depth_prediction
 
     def set_device(self):
+        if hasattr(self, "device") and self.device is not None:
+            return
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        print(f"Device is {self.device}")
+        self.model.to(self.device)
+        print(f"Model now on device={self.device}")
 
     def train(self, epochs=1):
         self.set_device()
-        self.model.to(self.device)
         validation_loss_history = []
         training_loss_history = []
 
@@ -106,6 +126,7 @@ class Trainer:
             self.dump_loss_history(training_loss_history)
 
     def calculate_validation_score(self):
+        self.set_device()
         total_loss = 0.0
         total_samples = 0
         for data in iter(self.validation_data):
@@ -192,3 +213,4 @@ if __name__ == "__main__":
         betas=(args.beta1, args.beta2),
     )
     trainer.train(epochs=args.epochs)
+    print("Training complete")
