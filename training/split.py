@@ -195,7 +195,6 @@ class Splitter:
             file = self.files[file_idx]
             dset: h5py.Group = file[key]
             dict_obj = {k: [dset[k][list_idx]] for k in dset.keys()}
-            # print()
             if add_to_hash:
                 self.hash_set.add(calculate_hash(dset["observation"][list_idx]))
             write_to_file(dict_obj, output_file, key)
@@ -216,15 +215,11 @@ def calculate_hash(input):
     return hash(str(input))
 
 
-def random_split(data_folder: str):
-    splitter = Splitter(data_folder)
+if __name__ == "__main__":
+    splitter = Splitter(["training-data/compiled/hdf5/25-07-07-1.hdf5"])
+    splitter.set_batch_size(64)
     splitter.generate_test_indices()
-    splitter.generate_test_split()
-    splitter.generate_train_validation_split()
-
-    idxs = _generate_test_indices(metadata)
-    hashes = _generate_test_split(idxs, files, output_file)
-    """Create a list of indices which will correspond to the test set and create a test set based on it."""
-
-    _generate_train_validation_split(hashes, files)
-    """Simply iterate over the entire file list and randomly place each sample in train or validation."""
+    splitter.generate_test_split("training-data/compiled/hdf5", "new-sample")
+    splitter.generate_train_validation_split(
+        "training-data/compiled/hdf5", "new-sample"
+    )

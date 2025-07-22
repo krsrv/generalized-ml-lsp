@@ -43,39 +43,6 @@ def sample_gate_set(
     return (gate_set_1q, gate_set_2q)
 
 
-def construct_gate_instances(
-    gate_set_1q: list[GT_1Q], gate_set_2q: list[GT_2Q], graph: torch.Tensor
-) -> list[Any]:
-    """Return the list of gates available in the layout. The elements are (gate, qubit index) and
-    (gate, control qubit index, target qubit index) for 1 and 2 qubit gates respectively.
-
-    Args:
-        gate_set_1q: number of vertices
-        gate_set_2q: Random number generator
-        graph: Laplacian of the
-
-    Returns:
-        list of gate instances: [(gate, qubit index) | (gate, control qubit index, target qubit index)]
-    """
-    gate_list = []
-    for q_idx, row in enumerate(graph):
-        gate_list = gate_list + [(gate, q_idx) for gate in gate_set_1q]
-        for t_idx, el in enumerate(row):
-            if torch.eq(el, torch.Tensor(1)):
-                for gate in gate_set_2q:
-                    if gate == GT_2Q.CZ:
-                        # Control and target are interchangeable
-                        if q_idx > t_idx:
-                            gate_list = gate_list + [
-                                (gate, q_idx, t_idx) for gate in gate_set_2q
-                            ]
-                    else:
-                        gate_list = gate_list + [
-                            (gate, q_idx, t_idx) for gate in gate_set_2q
-                        ]
-    return gate_list
-
-
 def create_lsp_env(
     layout: Layout, gate_set_1q: list[GT_1Q], gate_set_2q: list[GT_2Q], max_steps: int
 ) -> LogicalStatePreparationEnv:

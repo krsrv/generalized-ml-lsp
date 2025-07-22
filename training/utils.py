@@ -85,6 +85,11 @@ def write_to_file(dict_obj: dict, output_file: str, key: str) -> None:
                     dset[old_size:new_size, :, :] = v
                 elif len(dset.shape) == 2:
                     dset[old_size:new_size, :] = v
+                elif len(dset.shape) == 1:
+                    if len(v.shape) == 1:
+                        dset[old_size:new_size] = v
+                    elif len(v.shape) == 2:
+                        dset[old_size:new_size] = v[:, 0]
             except Exception as e:
                 print(f"Error occurred at (key, value) = ({k}, {v})")
                 raise e

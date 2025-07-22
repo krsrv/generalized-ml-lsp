@@ -87,11 +87,9 @@ class UnprepHdf5Dataloader:
         }
 
     def __iter__(self):
-        if not hasattr(self, "ng_iter_idx"):
-            self.ng_iter_idx = 0
-        if not hasattr(self, "batch_size"):
-            self.batch_size = 64
+        self.ng_iter_idx = 0
         self.batch_idx = 0
+        self.batch_size = 64
         return self
 
     def set_ng_iter_idx(self, ng_idx):
