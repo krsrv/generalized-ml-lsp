@@ -78,13 +78,14 @@ class Trainer:
         validation_loss_history = []
         training_loss_history = []
 
+        self.train_data.set_ng_iter_idx(531)  # corresponding to (n, g) = (3, 7)
+        self.train_data.set_batch_size(self.batch_size)
+        train_data = next(iter(self.train_data))
+
         total_size = self.train_data.get_total_size()
         for epoch in range(epochs):
             n_iter = int(total_size // self.batch_size)  #
             for i in range(n_iter):
-                n, g = self.train_data.random_sample_ng()
-                train_data = self.train_data.random_sample_data(n, g, self.batch_size)
-
                 self.optimizer.zero_grad()
                 gate_prediction, depth_prediction = self.run_model(train_data)
                 loss = self.compute_loss(
@@ -99,17 +100,9 @@ class Trainer:
                 training_loss_history.append(loss.detach().cpu().item())
 
                 if i % 500 == 0:
-                    validation_loss_history.append(self.calculate_validation_score())
-                    self.store_checkpoint(
-                        epoch, i, validation_loss_history[-1], training_loss_history[-1]
-                    )
                     self.dump_loss_history(training_loss_history)
 
             # Also store at the end of the model
-            validation_loss_history.append(self.calculate_validation_score())
-            self.store_checkpoint(
-                epoch, i, validation_loss_history[-1], training_loss_history[-1]
-            )
             self.dump_loss_history(training_loss_history)
 
     def calculate_validation_score(self):
@@ -175,16 +168,18 @@ if __name__ == "__main__":
     parser.add_argument("--expid", type=str, default="", help="Name suffix for folder")
     args = parser.parse_args()
 
+    print(args)
+
     device = "hpc"
     if device == "hpc":
-        train_file = "/scratch1/sauravk/lsp-hdf5/sample-train.hdf5"
-        validation_file = "/scratch1/sauravk/lsp-hdf5/sample-validation.hdf5"
-        test_file = "/scratch1/sauravk/lsp-hdf5/sample-test.hdf5"
+        train_file = "/scratch1/sauravk/lsp-hdf5/sample-test.hdf5"
+        validation_file = None  # "/scratch1/sauravk/lsp-hdf5/sample-validation.hdf5"
+        test_file = None  # "/scratch1/sauravk/lsp-hdf5/sample-test.hdf5"
         model_output_folder = create_new_folder("/scratch1/sauravk/models", args)
     else:
-        train_file = "training-data/compiled/hdf5/sample-train.hdf5"
-        validation_file = "training-data/compiled/hdf5/sample-validation.hdf5"
-        test_file = "training-data/compiled/hdf5/sample-test.hdf5"
+        train_file = "training-data/compiled/hdf5/sample-test.hdf5"
+        validation_file = None  # "training-data/compiled/hdf5/sample-validation.hdf5"
+        test_file = None  # "training-data/compiled/hdf5/sample-test.hdf5"
         model_output_folder = create_new_folder("output", args)
     print(f"Output folder: {model_output_folder}")
 

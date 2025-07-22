@@ -179,7 +179,7 @@ if __name__ == "__main__":
         create_h5_file(data, output_folder, file)
 
     folders = [
-        "/Users/tport/Desktop/USC/Semesters/Projects/LSP/sllsp/training-data/main-25-07-07-1",
+        "/Users/tport/Desktop/USC/Semesters/Projects/LSP/sllsp/training-data/main-25-07-10",
         # "/scratch1/sauravk/lsp-raw-training-data"
     ]
     ng_data = read_raw_data(folders)
@@ -212,5 +212,5 @@ if __name__ == "__main__":
         import time
 
         tic = time.time()
-        worker(ng_data, output_folder, "25-07-07-1.hdf5")
+        worker(ng_data, output_folder, "25-07-10.hdf5")
         print("Time elapsed:", time.time() - tic)
