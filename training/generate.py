@@ -5,6 +5,7 @@ import string
 import time
 from typing import Any
 
+import h5py
 import jax  # Only for interacting with LSP environment
 import numpy as np
 import torch
@@ -12,12 +13,119 @@ import torch
 from envs.logical_state_preparation_env import LogicalStatePreparationEnv
 from models.input import GT_1Q, GT_2Q, Layout, sample_layout
 from simulators.clifford_gates import CliffordGates
-from training.instance import TrainingInstance
+from training.utils import write_to_file
+from transform import _construct_gate_embeddings, _construct_gate_qubit_embeddings
 
 os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.1"
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
 jax.config.update("jax_platform_name", "cpu")
+
+
+class Params:
+    """Class to store data about a Clifford circuit, with the topology, applied gates, available gate sets
+    and a simulator.
+    Members:
+        n: int -> number of qubits
+        layout: Layout -> graph layout
+        gate_set_1q: list[GT_1Q] -> list of 1 qubit gate types
+        gate_set_2q: list[GT_2Q] -> list of 2 qubit gate types
+        circuit_depth: int -> number of gates applied
+        gates: list[Any] -> gates applied to the circuit. The gates are represented as indices of the env.action_space()
+            list.
+        observation: torch.Tensor -> the stabilizer/check matrix after the circuit execution
+        env: LogicalStatePreparationEnv -> simulator
+    """
+
+    def __init__(
+        self,
+        n: int,
+        layout: Layout,
+        gate_set_1q: list[GT_1Q],
+        gate_set_2q: list[GT_2Q],
+        circuit_depth: int,
+    ):
+        self.n = n
+        self.layout = layout
+        self.gate_set_1q = gate_set_1q
+        self.gate_set_2q = gate_set_2q
+        self.circuit_depth = circuit_depth
+        self.g = self.n * len(self.gate_set_1q) + len(self.layout.adjacency_list) * len(
+            self.gate_set_2q
+        )
+
+    def __hash__(self):
+        return hash(
+            (
+                self.n,
+                str(self.layout.graph.numpy()),
+                str([x.value for x in self.gate_set_1q]),
+                str([x.value for x in self.gate_set_2q]),
+                self.circuit_depth,
+                str(self.gates),
+            )
+        )
+
+
+def prepare_hdf5_dataset(output_file: str, n: int, g: int, d: int) -> None:
+    """
+    Sets up the HDF5 file for dumping contents. Pre-specifying expected feature dimensions makes the
+    module much faster.
+
+    * Assumes that the HDF5 file already exists, and there are no conflicting dataset names.
+    * The key prefix is n/g/d
+    * The keys are {key}/{n, layout, gate_oh, gate_qubit_oh, depth, observation}
+    * The `maxshape` argument is set to None, which means that the file can be extended infinitely.
+    * The `chunk` argument is set to True, which means that the contents will be written in chunks
+    ideally.
+
+    Args:
+        output_file: the full path to the file, including the ".hdf5" extension
+        n, g: number of qubits and gate instances
+        d: circuit depth
+    """
+    key = f"{n}/{g}/{d}"
+    gate_oh_size = len(GT_1Q) + len(GT_2Q)
+    with h5py.File(output_file, "a") as f:
+        if key in f:
+            return
+        f.create_dataset(
+            f"{key}/n", shape=(0,), maxshape=(None,), dtype="int64", chunks=True
+        )
+        f.create_dataset(
+            f"{key}/layout",
+            shape=(0, n, n),
+            maxshape=(None, n, n),
+            dtype="bool",
+            chunks=True,
+        )
+        f.create_dataset(
+            f"{key}/gate_oh",
+            shape=(0, g, gate_oh_size),
+            maxshape=(None, g, gate_oh_size),
+            dtype="bool",
+            chunks=True,
+        )
+        f.create_dataset(
+            f"{key}/gate_qubit_oh",
+            shape=(0, g, 2 * n),
+            maxshape=(None, g, 2 * n),
+            dtype="bool",
+            chunks=True,
+        )
+        f.create_dataset(
+            f"{key}/depth", shape=(0,), maxshape=(None,), dtype="int64", chunks=True
+        )
+        f.create_dataset(
+            f"{key}/gates", shape=(0, d), maxshape=(None, d), dtype="int64", chunks=True
+        )
+        f.create_dataset(
+            f"{key}/observation",
+            shape=(0, 2 * n * n + n),
+            maxshape=(None, 2 * n * n + n),
+            dtype="bool",
+            chunks=True,
+        )
 
 
 def sample_gate_set(
@@ -100,7 +208,7 @@ def sample_parameters(
     2 qubit gate set
     circuit depth
 
-    The sampled objects are returned wrapped in a TrainingInstance object.
+    The sampled objects are returned wrapped in a Params object.
     """
     # n = Number of qubits
     n = torch.randint(low=n_min, high=n_max, size=(1,), generator=gen)[0]
@@ -110,7 +218,23 @@ def sample_parameters(
     layout = sample_layout(n, gen)
     # Gate set
     gate_set_1q, gate_set_2q = sample_gate_set(gen)
+    depth = sample_depth(
+        n,
+        gate_set_1q,
+        gate_set_2q,
+        use_max_depth=use_max_depth,
+        gen=gen,
+    )
+    return Params(n, layout, gate_set_1q, gate_set_2q, depth)
 
+
+def sample_depth(
+    n: int,
+    gate_set_1q: list[GT_1Q],
+    gate_set_2q: list[GT_2Q],
+    use_max_depth=True,
+    gen: torch.Generator | None = None,
+):
     if len(gate_set_1q) + len(gate_set_2q) < 2:
         d_max = 3
     else:
@@ -134,44 +258,47 @@ def sample_parameters(
         )
         depth = depth.item()
 
-    return TrainingInstance(
-        n,
-        layout,
-        gate_set_1q,
-        gate_set_2q,
-        depth,
-        None,
-        None,
-        None,
-    )
+    return depth
 
 
-def generate_training_data_for_given_params(
-    base_structure: TrainingInstance,
+def new_dump_object() -> dict:
+    return {
+        "n": [],
+        "layout": [],
+        "gate_oh": [],
+        "gate_qubit_oh": [],
+        "depth": [],
+        "gates": [],
+        "observation": [],
+    }
+
+
+def generate_data_for_params(
+    params: Params,
+    output_dict: dict,
     jax_rng_key: jax.Array,
     gen: torch.Generator | None = None,
-    store_every_gate_output: bool = False,
-) -> tuple[TrainingInstance | list[TrainingInstance], jax.Array]:
-    """Given a partiall populated TrainingInstance `x` objects, generate a circuit of n = x.n qubits
+) -> dict:
+    """Given a partiall populated Params `x` objects, generate a circuit of n = x.n qubits
     with topology sepcified by x.layout, gate set by x.gate_set_{1q,2q} and depth x.circuit_depth
     Args:
-        TrainingInstance
+        Params
         keys: Tuple of 4 RNGs for jax
         gen: torch.Generator
     """
     key, key_reset, key_act, key_step = jax.random.split(jax_rng_key, 4)
 
     lsp_env = create_lsp_env(
-        base_structure.layout,
-        base_structure.gate_set_1q,
-        base_structure.gate_set_2q,
-        base_structure.circuit_depth,
+        params.layout,
+        params.gate_set_1q,
+        params.gate_set_2q,
+        params.circuit_depth,
     )
 
     env_params = None
     _observation, env_state = lsp_env.reset_env(key_reset, env_params)
 
-    n = base_structure.n
+    n = params.n
     assert (
         _observation.shape[-1] == 2 * n * n + n
     ), f"""Implementation (e.g. StabilizerEncoding) depends on the shape
@@ -179,8 +306,7 @@ def generate_training_data_for_given_params(
     instead"""
 
     gate_list = []
-    training_instance_list = []
-    for d in range(base_structure.circuit_depth):
+    for d in range(1, params.circuit_depth + 1):
         key_act, _rng = jax.random.split(key_act)
         gate_list.append(lsp_env.action_space(env_params).sample(key_act))
 
@@ -188,96 +314,62 @@ def generate_training_data_for_given_params(
         observation, env_state, _reward, _done, _info = lsp_env.step_env(
             key_step, env_state, gate_list[-1], env_params
         )
-        training_instance_list.append(
-            TrainingInstance(
-                base_structure.n,
-                base_structure.layout,
-                base_structure.gate_set_1q,
-                base_structure.gate_set_2q,
-                d,
-                gate_list.copy(),
-                np.array(observation),
-                lsp_env,
-            )
+        output_dict[d]["n"].append(n)
+
+        laplacian = params.layout.graph.numpy()
+        adjacency = laplacian - np.diag(np.diag(laplacian))
+        adjacency = np.array(adjacency, dtype=np.bool_)
+        output_dict[d]["layout"].append(adjacency)
+
+        gt_1q = np.array([x.value for x in params.gate_set_1q], dtype=np.int32)
+        gt_2q = np.array([x.value for x in params.gate_set_2q], dtype=np.int32)
+        output_dict[d]["gate_oh"].append(
+            _construct_gate_embeddings(gt_1q, gt_2q, adjacency)
         )
-    if store_every_gate_output:
-        return (training_instance_list, key)
-    else:
-        return (training_instance_list[-1], key)
+        output_dict[d]["gate_qubit_oh"].append(
+            _construct_gate_qubit_embeddings(gt_1q, gt_2q, adjacency)
+        )
+
+        output_dict[d]["depth"].append(d)
+        output_dict[d]["gates"].append(np.array(gate_list, dtype=np.int64))
+
+        observation = np.array(observation, dtype=np.bool_)
+        output_dict[d]["observation"].append(observation.copy())
+
+    return output_dict, key
 
 
-def generate_training_data(
-    N: int,
+def generate_and_write_training_data(
+    ng_pair_count: int,
+    file: str,
     jax_rng_key: jax.Array,
     gen: torch.Generator,
-    folder: str,
-    prefix: str = "",
-    use_random: bool = False,
 ) -> None:
-    def generate_file_name(folder, index, n_count, use_random):
-        file_name = f"{folder}/"
-        if prefix != "":
-            file_name += f"{prefix}-"
-        if use_random:
-            file_name = (
-                file_name
-                + "".join(
-                    random.choice(string.ascii_lowercase + string.digits)
-                    for _ in range(14)
-                )
-                + f"-{n_count}"
-                + ".pkl"
-            )
-            if os.path.exists(file_name):
-                return generate_file_name(folder, index, n_count, use_random)
-        else:
-            file_name = file_name + f"{index}-{n_count}.pkl"
-        return file_name
-
-    batch: list[TrainingInstance] = []
-    batch_size = 1_00
-    batch_count = 0
+    if not os.path.exists(file):
+        file_handler = h5py.File(file, "w")
+        file_handler.close()
+    else:
+        os.remove(file)
+        file_handler = h5py.File(file, "w")
+        file_handler.close()
     n_min, n_max = 2, 20
-    # generated_set = set()
-    for _i in range(N):
-        try:
-            # Sample random parameters
-            base_structure = sample_parameters(n_min, n_max, gen, use_max_depth=True)
-            # print(f"n: {base_structure.n}, gates: {base_structure.gate_set_1q}, {base_structure.gate_set_2q}, edges: {len(base_structure.layout.adjacency_list)}, max_depth: {base_structure.circuit_depth}")
-            instances, jax_rng_key = generate_training_data_for_given_params(
-                base_structure, jax_rng_key, gen, store_every_gate_output=True
+    for _ in range(ng_pair_count):
+        params = sample_parameters(n_min, n_max, gen, use_max_depth=True)
+        depth_instance_map = {
+            k: new_dump_object() for k in range(1, params.circuit_depth + 1)
+        }
+        for _ in range(10):
+            depth_instance_map, jax_rng_key = generate_data_for_params(
+                params, depth_instance_map, jax_rng_key, gen
             )
-            # if hash(instance) in generated_set:
-            #     continue
-            # generated_set.add(hash(instance))
-            # Handle both single instance and list of instances
-            if isinstance(instances, list):
-                batch = batch + instances
-            else:
-                batch.append(instances)
-
-            # Force garbage collection to free memory
-            # import gc
-            # gc.collect()
-
-        except Exception as e:
-            print(f"Error generating instance {_i}: {e}")
-            continue
-        file_name = generate_file_name(folder, batch_count, _i, use_random)
-        if len(batch) > batch_size:
-            with open(file_name, "wb") as f:
-                pickle.dump(batch, f)
-                batch = []
-                batch_count += 1
-    file_name = generate_file_name(folder, batch_count, _i, use_random)
-    if len(batch) > 0:
-        with open(file_name, "wb") as f:
-            pickle.dump(batch, f)
-            batch = []
-            batch_count += 1
+        for depth, instance_dict in depth_instance_map.items():
+            # file_handler = h5py.File(file, "r")
+            # print(file_handler.keys())
+            prepare_hdf5_dataset(file, params.n, params.g, depth)
+            write_to_file(instance_dict, file, f"{params.n}/{params.g}/{depth}")
 
 
-def parallel_task(n_instances, folder, prefix, random_name):
+def parallel_task(ng_pair_count, file):
     seed = time.time_ns()
 
     # JAX RNG
@@ -287,7 +379,7 @@ def parallel_task(n_instances, folder, prefix, random_name):
     gen = torch.Generator()
     gen.manual_seed(seed)
     tic = time.time()
-    generate_training_data(n_instances, key, gen, folder, prefix, random_name)
+    generate_and_write_training_data(ng_pair_count, file, key, gen)
     toc = time.time()
     print(toc - tic)
 
@@ -296,9 +388,6 @@ if __name__ == "__main__":
     import argparse
     import multiprocessing
 
-    def task(_):
-        parallel_task(args.n, args.f, args.p, args.random_name)
-
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "-n", type=int, default=100, help="Number of training instances to generate"
@@ -306,21 +395,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "-f",
         type=str,
-        default="training-data",
+        default="training-data/sd.hdf5",
         help="Relative path to (existing) output folder",
     )
-    parser.add_argument(
-        "-p",
-        type=str,
-        default="",
-        help="file name prefix",
-    )
-    parser.add_argument(
-        "--random-name", action="store_true", help="Use random names for file outputs"
-    )
-    parser.add_argument("-t", type=int, default=8, help="Number of processes to spawn")
     args = parser.parse_args()
-    with multiprocessing.Pool(processes=args.t) as pool:  # 8 CPUs available
-        results = pool.map(task, range(args.t))
-    # return results
-    # parallelize_task()
+    parallel_task(args.n, args.f)
