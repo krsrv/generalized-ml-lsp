@@ -1,7 +1,10 @@
+"""
+Generate raw data corresponding to gates in a random circuit. The module generates an HDF5 file
+with keys of the form `n/g/d/{key}` where `n` = number of qubits, `g` = number of gate instances,
+`d` = circuit depth, {key} = {n, layout, observation, depth, gates, gate_oh, gate_qubits_oh}.
+"""
+
 import os
-import pickle
-import random
-import string
 import time
 from typing import Any
 
@@ -73,8 +76,8 @@ def prepare_hdf5_dataset(output_file: str, n: int, g: int, d: int) -> None:
     module much faster.
 
     * Assumes that the HDF5 file already exists, and there are no conflicting dataset names.
-    * The key prefix is n/g/d
-    * The keys are {key}/{n, layout, gate_oh, gate_qubit_oh, depth, observation}
+    * The keys are {prefix}/{n, layout, gate_oh, gate_qubit_oh, depth, observation}
+    * The key prefix is n/g/d, where d is the depth of the circuit
     * The `maxshape` argument is set to None, which means that the file can be extended infinitely.
     * The `chunk` argument is set to True, which means that the contents will be written in chunks
     ideally.
@@ -235,6 +238,10 @@ def sample_depth(
     use_max_depth=True,
     gen: torch.Generator | None = None,
 ):
+    """
+    Given n, 1 and 2 qubit gate sets, randomly sample the circuit depth. If `use_max_depth` is True,
+    simply choose the max depth for which we expect the random circuit to be close to optimal.
+    """
     if len(gate_set_1q) + len(gate_set_2q) < 2:
         d_max = 3
     else:
@@ -262,6 +269,9 @@ def sample_depth(
 
 
 def new_dump_object() -> dict:
+    """
+    Generate the leaf object to dump in the HDF5 file.
+    """
     return {
         "n": [],
         "layout": [],
@@ -279,8 +289,8 @@ def generate_data_for_params(
     jax_rng_key: jax.Array,
     gen: torch.Generator | None = None,
 ) -> dict:
-    """Given a partiall populated Params `x` objects, generate a circuit of n = x.n qubits
-    with topology sepcified by x.layout, gate set by x.gate_set_{1q,2q} and depth x.circuit_depth
+    """Given a Params `x` objects, generate a circuit of n = x.n qubits with topology sepcified by
+    x.layout, gate set by x.gate_set_{1q,2q} and depth x.circuit_depth
     Args:
         Params
         keys: Tuple of 4 RNGs for jax
@@ -345,43 +355,54 @@ def generate_and_write_training_data(
     jax_rng_key: jax.Array,
     gen: torch.Generator,
 ) -> None:
-    if not os.path.exists(file):
-        file_handler = h5py.File(file, "w")
-        file_handler.close()
-    else:
-        os.remove(file)
-        file_handler = h5py.File(file, "w")
-        file_handler.close()
+    """
+    Given a number of (n, g) pairs to sample, and path to an HDF5 file, for each count:
+    1. Sample a random circuit layout
+    2. Generate 10 random circuits for the given random circuit
+    3. Dump the generated circuit to the HDF5 file.
+    """
+    ## Remove the file if it already exists.
+    # if os.path.exists(file):
+    #     os.remove(file)
+
+    # Create the h5py file
+    file_handler = h5py.File(file, "w")
+    file_handler.close()
+
     n_min, n_max = 2, 20
-    for _ in range(ng_pair_count):
+    repeat_count = 10
+    for i in range(ng_pair_count):
+        # Sample random qubit layout
         params = sample_parameters(n_min, n_max, gen, use_max_depth=True)
+        # Create new dump object corresponding to each circuit depth
         depth_instance_map = {
             k: new_dump_object() for k in range(1, params.circuit_depth + 1)
         }
-        for _ in range(10):
+        # Populate `depth_instance_map` with `repeat_count` random circuits
+        for _ in range(repeat_count):
             depth_instance_map, jax_rng_key = generate_data_for_params(
                 params, depth_instance_map, jax_rng_key, gen
             )
+        # For each depth, dump the contents to the HDF5 file.
         for depth, instance_dict in depth_instance_map.items():
-            # file_handler = h5py.File(file, "r")
-            # print(file_handler.keys())
             prepare_hdf5_dataset(file, params.n, params.g, depth)
             write_to_file(instance_dict, file, f"{params.n}/{params.g}/{depth}")
+        print(f"Completed {i} pairs")
 
 
-def parallel_task(ng_pair_count, file):
+def parallel_task_wrapper(ng_pair_count, filename):
     seed = time.time_ns()
-
     # JAX RNG
     key = jax.random.key(seed)
-
     # Torch RNG
     gen = torch.Generator()
     gen.manual_seed(seed)
+
     tic = time.time()
-    generate_and_write_training_data(ng_pair_count, file, key, gen)
+    generate_and_write_training_data(ng_pair_count, filename, key, gen)
     toc = time.time()
-    print(toc - tic)
+
+    print(f"{filename} generated ({toc - tic} sec)")
 
 
 if __name__ == "__main__":
@@ -398,5 +419,16 @@ if __name__ == "__main__":
         default="training-data/sd.hdf5",
         help="Relative path to (existing) output folder",
     )
+    parser.add_argument("-t", type=int, default=8, help="Number of processes to spawn")
+    parser.add_argument("--expid", type=str, default="", help="Experiment ID")
     args = parser.parse_args()
-    parallel_task(args.n, args.f)
+
+    if args.t > 1:
+        print(f"Starting {args.t} processes")
+        params = [(args.n, f"{args.f}/{args.expid}-{i}.hdf5") for i in range(args.t)]
+        with multiprocessing.Pool(processes=args.t) as pool:  # 8 CPUs available
+            results = pool.starmap(parallel_task_wrapper, params)
+    else:
+        print(f"Starting {args.t} process")
+        parallel_task_wrapper(args.n, f"{args.f}/{args.expid}.hdf5")
+    print("Data generation complete")
