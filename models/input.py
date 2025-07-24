@@ -1,6 +1,7 @@
+from enum import Enum
+
 import torch
 import torch.nn.functional as F
-from enum import Enum
 
 
 class GT_1Q(Enum):
@@ -41,9 +42,9 @@ class Layout:
         for q_idx, row in enumerate(graph):
             for t_idx, el in enumerate(row):
                 # Assumes `graph` is an int tensor
-                if q_idx > t_idx and (el == 1 or el == 1.0):
+                if el == 1 or el == 1.0:
                     adj_list.append((q_idx, t_idx))
-                    adj_list.append((t_idx, q_idx))
+                    # adj_list.append((t_idx, q_idx))
         return adj_list
 
     @staticmethod
@@ -57,7 +58,7 @@ class Layout:
         ctrl_list, tgt_list = [], []
         for q_idx, row in enumerate(graph):
             for t_idx, el in enumerate(row):
-                if q_idx > t_idx and (el == 1 or el == 1.0):
+                if el == 1 or el == 1.0:
                     ctrl_list.append(q_idx)
                     tgt_list.append(t_idx)
 
