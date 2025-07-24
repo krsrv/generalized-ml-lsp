@@ -66,7 +66,9 @@ class Trainer:
 
         self.checkpoint_folder = checkpoint_folder
 
-    def compute_loss(self, gate_prediction, depth_prediction, true_gates, true_depth):
+    def compute_loss(
+        self, gate_prediction, depth_prediction, true_gates, true_depth
+    ) -> torch.Tensor:
         return self.gate_loss(
             gate_prediction, true_gates
         ) + self.alpha * self.depth_loss(depth_prediction, true_depth.float())
@@ -98,9 +100,12 @@ class Trainer:
         validation_loss_history = []
         training_loss_history = []
 
-        self.train_data.set_ng_iter_idx(531)  # corresponding to (n, g) = (3, 7)
-        self.train_data.set_batch_size(self.batch_size)
-        train_data = next(iter(self.train_data))
+        self.train_data.set_ng_iter_idx(0)  # corresponding to (n, g) = (3, 7)
+        iterator = iter(self.train_data)
+        self.train_data.set_batch_size(
+            self.batch_size
+        )  # Batch size needs to be set after the iterator is initialized
+        train_data = next(iterator)
 
         total_size = self.train_data.get_total_size()
         for epoch in range(epochs):
@@ -117,6 +122,7 @@ class Trainer:
                     ),
                 )
                 loss.backward()
+                self.optimizer.step()
                 training_loss_history.append(loss.detach().cpu().item())
 
                 if i % 500 == 0:

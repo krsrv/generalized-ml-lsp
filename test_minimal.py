@@ -56,7 +56,9 @@ class Trainer:
 
         self.checkpoint_folder = checkpoint_folder
 
-    def compute_loss(self, gate_prediction, depth_prediction, true_gates, true_depth):
+    def compute_loss(
+        self, gate_prediction, depth_prediction, true_gates, true_depth
+    ) -> torch.Tensor:
         return self.gate_loss(
             gate_prediction, true_gates
         ) + self.alpha * self.depth_loss(depth_prediction, true_depth.float())
@@ -103,6 +105,7 @@ class Trainer:
                     ),
                 )
                 loss.backward()
+                self.optimizer.step()
                 training_loss_history.append(loss.detach().cpu().item())
 
                 if i % 500 == 0:
