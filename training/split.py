@@ -3,11 +3,27 @@ Tools to split a given HDF5 file into training, test, validation (and potentiall
 """
 
 import os
+import time
+from functools import wraps
 
 import h5py
 import numpy as np
 
 from training.utils import prepare_hdf5_dataset, write_to_file
+
+
+def timeit(func):
+    @wraps(func)
+    def timeit_wrapper(*args, **kwargs):
+        start_time = time.perf_counter()
+        result = func(*args, **kwargs)
+        end_time = time.perf_counter()
+        total_time = end_time - start_time
+        # first item in the args, ie `args[0]` is `self`
+        print(f"Function {func.__name__}{args} {kwargs} Took {total_time:.4f} seconds")
+        return result
+
+    return timeit_wrapper
 
 
 class Splitter:
@@ -29,12 +45,12 @@ class Splitter:
         self.per_file_metadata = {}
         self.aggregate_metadata = {}
         self.reverse_map = {}
-        total = 0
+        self.total_size = 0
         for i, file in enumerate(self.files):
             for n in file.keys():
                 for g in file[n].keys():
                     size = file[n][g]["n"].shape[0]
-                    total += size
+                    self.total_size += size
 
                     self.per_file_metadata[(i, int(n), int(g))] = size
 
@@ -43,9 +59,6 @@ class Splitter:
                         self.reverse_map[(int(n), int(g))] = []
                     self.aggregate_metadata[(int(n), int(g))] += size
                     self.reverse_map[(int(n), int(g))].append(i)
-
-                    # if total > 100000:
-                    #     return
 
     def set_batch_size(self, batch_size) -> None:
         self.batch_size = batch_size
@@ -58,6 +71,7 @@ class Splitter:
                         for o in f[n][g]["observation"]:
                             self.hash_set.add(calculate_hash(o))
 
+    @timeit
     def generate_test_indices(self) -> int:
         """
         Among all (n, g) tuples, calculate the indices of (n, g) tuples to sample along with the
@@ -83,6 +97,7 @@ class Splitter:
         self.test_idxs, self.test_idx_counts = np.unique(idxs, return_counts=True)
         return self.test_size
 
+    @timeit
     def generate_test_split(self, folder: str, file_prefix: str):
         """
         Given the indices of (n, g) tuples to sample along with the number of corresponding samples
@@ -95,6 +110,8 @@ class Splitter:
         self.create_output_file(output_file)
         keys = list(self.aggregate_metadata.keys())
 
+        # self.test_idxs stores the (n, g) tuple index
+        # self.test_idx_counts stores the number of samples of samples to draw
         for idx, count in zip(self.test_idxs, self.test_idx_counts):
             n, g = keys[idx]
             total_samples = self.aggregate_metadata[(n, g)]
@@ -110,12 +127,14 @@ class Splitter:
                 [self.per_file_metadata[(i, n, g)] for i in self.reverse_map[(n, g)]]
             )
             search_arr = np.cumsum(size_arr)
-            file_idxs = search_arr.searchsorted(buff_idxs, "right")
-            list_idxs = buff_idxs - search_arr[file_idxs]
+            search_arr_idxs = search_arr.searchsorted(buff_idxs, "right")
+            list_idxs = buff_idxs - search_arr[search_arr_idxs]
+            file_idxs = np.array(self.reverse_map[(n, g)])[search_arr_idxs]
 
             # Dump the contents to file:
             self.dump_to_file(n, g, file_idxs, list_idxs, output_file, add_to_hash=True)
 
+    @timeit
     def generate_train_validation_split(
         self, folder: str, file_prefix: str
     ) -> tuple[int, int]:
@@ -132,6 +151,7 @@ class Splitter:
         keys = list(self.aggregate_metadata.keys())
         train_count, validation_count = 0, 0
 
+        current_hash_set = np.array(list(self.hash_set))
         for key in keys:
             n, g = key
             per_key_file_idxs = []
@@ -143,7 +163,7 @@ class Splitter:
                 hashes = np.array(
                     [calculate_hash(x) for x in file["observation"][all_idxs]]
                 )
-                mask = ~np.isin(hashes, np.array(self.hash_set))
+                mask = ~np.isin(hashes, current_hash_set)
                 indices = np.where(mask)[0]
                 per_key_list_idxs.append(indices)
                 per_key_file_idxs.append(np.ones_like(indices) * i)
@@ -216,10 +236,25 @@ def calculate_hash(input):
 
 
 if __name__ == "__main__":
-    splitter = Splitter(["training-data/compiled/hdf5/25-07-07-1.hdf5"])
-    splitter.set_batch_size(64)
-    splitter.generate_test_indices()
-    splitter.generate_test_split("training-data/compiled/hdf5", "new-sample")
-    splitter.generate_train_validation_split(
-        "training-data/compiled/hdf5", "new-sample"
+    import time
+
+    np.random.seed(1)
+
+    splitter = Splitter(
+        [
+            "training-data/compiled/extracted-0.hdf5",
+            "training-data/compiled/extracted-1.hdf5",
+            "training-data/compiled/extracted-2.hdf5",
+            "training-data/compiled/extracted-3.hdf5",
+        ]
     )
+    print(f"Total size: {splitter.total_size}")
+    splitter.set_batch_size(64)
+    test_size = splitter.generate_test_indices()
+    print(f"Test size: {test_size}")
+    prefix = "sample"
+    splitter.generate_test_split("training-data/compiled/hdf5", prefix)
+    train_size, validation_size = splitter.generate_train_validation_split(
+        "training-data/compiled/hdf5", prefix
+    )
+    print(f"Train, validation size: {train_size}, {validation_size}")
