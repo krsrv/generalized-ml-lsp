@@ -1,11 +1,50 @@
-"""
-HDF5 file handling functions
-"""
-
 import h5py
 import numpy as np
 
 from models.input import GT_1Q, GT_2Q
+
+"""
+Utility functions for creating gate embeddings
+"""
+
+
+def construct_gate_embeddings(
+    gt_1q: np.ndarray, gt_2q: np.ndarray, adjacency_matrix: np.ndarray
+):
+    num_classes = len(GT_1Q) + len(GT_2Q)
+    gt_1q_oh = np.eye(num_classes, dtype=np.bool_)[gt_1q - 1]  # Shape: (G1, G)
+    n = adjacency_matrix.shape[-1]
+    gt_1q_oh = np.repeat(gt_1q_oh, n, axis=-2)  # Shape: (G1 * n, G)
+
+    gt_2q_oh = np.eye(num_classes, dtype=np.bool_)[
+        gt_2q - 1 + len(GT_1Q)
+    ]  # Shape: (G2, G)
+    edges = np.count_nonzero(adjacency_matrix)
+    gt_2q_oh = np.repeat(gt_2q_oh, edges, axis=-2)  # Shape: (G2 * E, G)
+
+    return np.concat((gt_1q_oh, gt_2q_oh), axis=-2)
+
+
+def construct_gate_qubit_embeddings(
+    gt_1q: np.ndarray, gt_2q: np.ndarray, adjacency_matrix: np.ndarray
+):
+    n = adjacency_matrix.shape[-1]
+    qbit_gt_1q = np.pad(
+        np.diag(np.ones(n, dtype=np.bool_)), ((0, 0), (0, n))
+    )  # Shape: (n, 2n)
+    qbit_gt_1q = np.tile(qbit_gt_1q, (gt_1q.shape[-1], 1))
+
+    ctrl, tgt = np.nonzero(adjacency_matrix)
+    qbit_gt_2q = np.concat(
+        (np.eye(n, dtype=np.bool_)[ctrl], np.eye(n, dtype=np.bool_)[tgt]), axis=-1
+    )
+    qbit_gt_2q = np.tile(qbit_gt_2q, (gt_2q.shape[-1], 1))
+    return np.concat((qbit_gt_1q, qbit_gt_2q), axis=-2)
+
+
+"""
+HDF5 file handling functions
+"""
 
 
 def prepare_hdf5_dataset(output_file: str, n: int, g: int) -> None:
@@ -73,14 +112,14 @@ def write_to_file(dict_obj: dict, output_file: str, key: str) -> None:
     """
     with h5py.File(output_file, "a") as f:
         for k, v in dict_obj.items():
-            dset: h5py.Dataset = f[f"{key}/{k}"]
-            old_size = dset.shape[0]
-            if type(v) != np.ndarray:
-                v = np.array(v)
-            new_size = old_size + v.shape[0]
-            # Necessary step, because the
-            dset.resize((new_size, *dset.shape[1:]))
             try:
+                dset: h5py.Dataset = f[f"{key}/{k}"]
+                old_size = dset.shape[0]
+                if type(v) != np.ndarray:
+                    v = np.array(v)
+                new_size = old_size + v.shape[0]
+                # Necessary step, because the
+                dset.resize((new_size, *dset.shape[1:]))
                 if len(dset.shape) == 3:
                     dset[old_size:new_size, :, :] = v
                 elif len(dset.shape) == 2:
@@ -91,5 +130,5 @@ def write_to_file(dict_obj: dict, output_file: str, key: str) -> None:
                     elif len(v.shape) == 2:
                         dset[old_size:new_size] = v[:, 0]
             except Exception as e:
-                print(f"Error occurred at (key, value) = ({k}, {v})")
+                print(f"Error occurred at (n, g)/(key, value) = {key}/({k}, {v})")
                 raise e

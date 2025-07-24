@@ -16,8 +16,11 @@ import torch
 from envs.logical_state_preparation_env import LogicalStatePreparationEnv
 from models.input import GT_1Q, GT_2Q, Layout, sample_layout
 from simulators.clifford_gates import CliffordGates
-from training.utils import write_to_file
-from transform import _construct_gate_embeddings, _construct_gate_qubit_embeddings
+from training.utils import (
+    construct_gate_embeddings,
+    construct_gate_qubit_embeddings,
+    write_to_file,
+)
 
 os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.1"
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
@@ -334,10 +337,10 @@ def generate_data_for_params(
         gt_1q = np.array([x.value for x in params.gate_set_1q], dtype=np.int32)
         gt_2q = np.array([x.value for x in params.gate_set_2q], dtype=np.int32)
         output_dict[d]["gate_oh"].append(
-            _construct_gate_embeddings(gt_1q, gt_2q, adjacency)
+            construct_gate_embeddings(gt_1q, gt_2q, adjacency)
         )
         output_dict[d]["gate_qubit_oh"].append(
-            _construct_gate_qubit_embeddings(gt_1q, gt_2q, adjacency)
+            construct_gate_qubit_embeddings(gt_1q, gt_2q, adjacency)
         )
 
         output_dict[d]["depth"].append(d)
@@ -416,7 +419,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "-f",
         type=str,
-        default="training-data/sd.hdf5",
+        default="training-data",
         help="Relative path to (existing) output folder",
     )
     parser.add_argument("-t", type=int, default=8, help="Number of processes to spawn")
