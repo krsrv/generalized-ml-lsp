@@ -181,20 +181,22 @@ class Splitter:
                 size=(per_key_validation_size,),
                 replace=False,
             )
+            validation_idx_mask = np.zeros(per_key_count, dtype=bool)
+            validation_idx_mask[validation_idx] = True
 
             # Dump contents to respective files
             self.dump_to_file(
                 n,
                 g,
-                per_key_file_idxs[validation_idx],
-                per_key_list_idxs[validation_idx],
+                per_key_file_idxs[validation_idx_mask],
+                per_key_list_idxs[validation_idx_mask],
                 validation_file,
             )
             self.dump_to_file(
                 n,
                 g,
-                per_key_file_idxs[~validation_idx],
-                per_key_list_idxs[~validation_idx],
+                per_key_file_idxs[~validation_idx_mask],
+                per_key_list_idxs[~validation_idx_mask],
                 train_file,
             )
             train_count += per_key_train_size
@@ -242,17 +244,19 @@ if __name__ == "__main__":
 
     splitter = Splitter(
         [
-            "training-data/compiled/extracted-0.hdf5",
-            "training-data/compiled/extracted-1.hdf5",
-            "training-data/compiled/extracted-2.hdf5",
-            "training-data/compiled/extracted-3.hdf5",
+            "training-data/compiled/night-run-extracted-0.hdf5",
+            # "training-data/compiled/night-run-extracted-1.hdf5",
+            # "training-data/compiled/night-run-extracted-2.hdf5",
+            # "training-data/compiled/night-run-extracted-3.hdf5",
+            # "training-data/compiled/night-run-extracted-4.hdf5",
+            # "training-data/compiled/night-run-extracted-5.hdf5",
         ]
     )
     print(f"Total size: {splitter.total_size}")
     splitter.set_batch_size(64)
     test_size = splitter.generate_test_indices()
     print(f"Test size: {test_size}")
-    prefix = "sample"
+    prefix = "new-sample"
     splitter.generate_test_split("training-data/compiled/hdf5", prefix)
     train_size, validation_size = splitter.generate_train_validation_split(
         "training-data/compiled/hdf5", prefix
