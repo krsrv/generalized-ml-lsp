@@ -63,8 +63,10 @@ class Trainer:
             gate_prediction, true_gates
         ) + self.alpha * self.depth_loss(depth_prediction, true_depth.float())
 
-    def run_model(self, data, use_grad=True):
+    def run_model(self, data, use_grad=True, use_eval=False):
         with torch.set_grad_enabled(use_grad):
+            if use_eval:
+                self.model.eval()
             gate_prediction, depth_prediction = self.model.forward(
                 torch.tensor(data["eigval"], dtype=torch.float).to(self.device),
                 torch.tensor(data["eigvec"], dtype=torch.float).to(self.device),
@@ -72,6 +74,8 @@ class Trainer:
                 torch.tensor(data["gate_qubit_oh"], dtype=torch.bool).to(self.device),
                 torch.tensor(data["observation"], dtype=torch.bool).to(self.device),
             )
+            if use_eval:
+                self.model.train()
         return gate_prediction, depth_prediction
 
     def set_device(self):
@@ -114,6 +118,7 @@ class Trainer:
                         epoch, i, validation_loss_history[-1], training_loss_history[-1]
                     )
                     self.dump_loss_history(training_loss_history)
+                    print(f"Completed {i} iters, {epoch} epochs")
 
             # Also store at the end of the model
             validation_loss_history.append(self.calculate_validation_score())
@@ -122,12 +127,14 @@ class Trainer:
             )
             self.dump_loss_history(training_loss_history)
 
-    def calculate_validation_score(self):
+    def evaluate_model(self, dataset) -> torch.Tensor:
         self.set_device()
         total_loss = 0.0
         total_samples = 0
-        for data in iter(self.validation_data):
-            gate_prediction, depth_prediction = self.run_model(data, use_grad=False)
+        for data in iter(dataset):
+            gate_prediction, depth_prediction = self.run_model(
+                data, use_grad=False, use_eval=True
+            )
             loss = self.compute_loss(
                 gate_prediction,
                 depth_prediction,
@@ -139,6 +146,12 @@ class Trainer:
             total_samples += batch_size
         average_loss = total_loss / total_samples
         return average_loss
+
+    def calculate_validation_score(self) -> torch.Tensor:
+        return self.evaluate_model(self.validation_data)
+
+    def calculate_test_score(self) -> torch.Tensor:
+        return self.evaluate_model(self.test_data)
 
     def dump_loss_history(self, loss_history):
         file = f"{self.checkpoint_folder}/training_loss.npy"
@@ -157,12 +170,9 @@ class Trainer:
             f"{self.checkpoint_folder}/model-{epoch}-{iter_idx}.pt",
         )
 
-    def test(self):
-        raise NotImplementedError
-
 
 def create_new_folder(prefix: str, args: Namespace):
-    name = f"{args.expid}-lr={args.lr}-beta={args.beta1,args.beta2}-{args.name}"
+    name = f"{args.expid}-epochs={args.epochs}-lr={args.lr}-beta={args.beta1,args.beta2}-{args.name}"
     folder = f"{prefix}/{name}"
     if not os.path.exists(folder):
         os.mkdir(folder)
@@ -186,7 +196,7 @@ if __name__ == "__main__":
     parser.add_argument("--expid", type=str, default="", help="Name suffix for folder")
     args = parser.parse_args()
 
-    device = "hpc"
+    device = "cpu"
     if device == "hpc":
         train_file = "/scratch1/sauravk/lsp-hdf5/sample-train.hdf5"
         validation_file = "/scratch1/sauravk/lsp-hdf5/sample-validation.hdf5"
@@ -207,9 +217,44 @@ if __name__ == "__main__":
         lr=args.lr,
         betas=(args.beta1, args.beta2),
     )
+
+    metadata = {}
+
     tic = time.time()
     loss = trainer.calculate_validation_score()
     toc = time.time()
     print(f"Initial validation loss = {loss} ({toc-tic} s)")
+    metadata["validation"] = toc - tic
+
+    tic = time.time()
     trainer.train(epochs=args.epochs)
-    print("Training complete")
+    toc = time.time()
+    print(f"Training complete ({toc-tic} s)")
+    metadata["train"] = toc - tic
+
+    tic = time.time()
+    loss = trainer.calculate_test_score()
+    toc = time.time()
+    print(f"Test loss = {loss} ({toc-tic} s)")
+    metadata["test"] = toc - tic
+
+    import json
+    import os
+
+    metadata["cpu_count"] = [os.cpu_count()]
+    if torch.cuda.is_available():
+        metadata["gpu_count"] = torch.cuda.device_count()
+        metadata["gpu"] = []
+        for i in range(metadata["gpu_count"]):
+            gpu_name = torch.cuda.get_device_name(i)
+            gpu_properties = torch.cuda.get_device_properties(i)
+            metadata["gpu"].append(
+                {
+                    "name": gpu_name,
+                    "memory": gpu_properties.total_memory / (1024**3),
+                    "multi_processor_count": gpu_properties.multi_processor_count,
+                }
+            )
+
+    with open(f"{model_output_folder}/metadata.json", "w") as f:
+        json.dump(metadata, f)

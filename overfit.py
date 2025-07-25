@@ -127,6 +127,7 @@ class Trainer:
 
                 if i % 500 == 0:
                     self.dump_loss_history(training_loss_history)
+                    print(f"Completed {i} iters, {epoch} epochs")
 
             # Also store at the end of the model
             self.dump_loss_history(training_loss_history)
@@ -171,7 +172,7 @@ class Trainer:
 
 
 def create_new_folder(prefix: str, args: Namespace):
-    name = f"{args.expid}-lr={args.lr}-beta={args.beta1,args.beta2}-{args.name}"
+    name = f"{args.expid}-epochs={args.epochs}-lr={args.lr}-beta={args.beta1,args.beta2}-{args.name}"
     folder = f"{prefix}/{name}"
     if not os.path.exists(folder):
         os.mkdir(folder)
@@ -218,5 +219,32 @@ if __name__ == "__main__":
         lr=args.lr,
         betas=(args.beta1, args.beta2),
     )
+
+    metadata = {}
+
+    tic = time.time()
     trainer.train(epochs=args.epochs)
-    print("Training complete")
+    toc = time.time()
+    print(f"Training complete ({toc-tic} s)")
+    metadata["train"] = toc - tic
+
+    import json
+    import os
+
+    metadata["cpu_count"] = [os.cpu_count()]
+    if torch.cuda.is_available():
+        metadata["gpu_count"] = torch.cuda.device_count()
+        metadata["gpu"] = []
+        for i in range(metadata["gpu_count"]):
+            gpu_name = torch.cuda.get_device_name(i)
+            gpu_properties = torch.cuda.get_device_properties(i)
+            metadata["gpu"].append(
+                {
+                    "name": gpu_name,
+                    "memory": gpu_properties.total_memory / (1024**3),
+                    "multi_processor_count": gpu_properties.multi_processor_count,
+                }
+            )
+
+    with open(f"{model_output_folder}/metadata.json", "w") as f:
+        json.dump(metadata, f)
