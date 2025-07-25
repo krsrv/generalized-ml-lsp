@@ -179,6 +179,12 @@ def create_new_folder(prefix: str, args: Namespace):
     return folder
 
 
+def update_metadata_with_args(args: Namespace, metadata: dict):
+    metadata["args"] = {}
+    for key, value in args._get_kwargs():
+        metadata["args"][key] = value
+
+
 if __name__ == "__main__":
     # INSERT_YOUR_CODE
     import argparse
@@ -194,20 +200,26 @@ if __name__ == "__main__":
     )
     parser.add_argument("--name", type=str, default="", help="Name suffix for folder")
     parser.add_argument("--expid", type=str, default="", help="Name suffix for folder")
+    parser.add_argument(
+        "--device", type=str, default="hpc", help="Name suffix for folder"
+    )
     args = parser.parse_args()
+    print(f"Args: {args}")
 
-    print(args)
-
-    device = "hpc"
-    if device == "hpc":
-        train_file = "/scratch1/sauravk/lsp-hdf5/sample-test.hdf5"
-        validation_file = None  # "/scratch1/sauravk/lsp-hdf5/sample-validation.hdf5"
-        test_file = None  # "/scratch1/sauravk/lsp-hdf5/sample-test.hdf5"
+    if args.device == "hpc":
+        train_file = "/scratch1/sauravk/lsp-hdf5/sample-train.hdf5"
+        validation_file = "/scratch1/sauravk/lsp-hdf5/sample-validation.hdf5"
+        test_file = "/scratch1/sauravk/lsp-hdf5/sample-test.hdf5"
         model_output_folder = create_new_folder("/scratch1/sauravk/models", args)
-    else:
-        train_file = "training-data/compiled/hdf5/sample-test.hdf5"
-        validation_file = None  # "training-data/compiled/hdf5/sample-validation.hdf5"
-        test_file = None  # "training-data/compiled/hdf5/sample-test.hdf5"
+    elif args.device == "mac":
+        train_file = "training-data/compiled/hdf5/sample-train.hdf5"
+        validation_file = "training-data/compiled/hdf5/sample-validation.hdf5"
+        test_file = "training-data/compiled/hdf5/sample-test.hdf5"
+        model_output_folder = create_new_folder("output", args)
+    elif args.device == "qserver":
+        train_file = "training-data/compiled/hdf5/sample-train.hdf5"
+        validation_file = "training-data/compiled/hdf5/sample-validation.hdf5"
+        test_file = "training-data/compiled/hdf5/sample-test.hdf5"
         model_output_folder = create_new_folder("output", args)
     print(f"Output folder: {model_output_folder}")
 
@@ -221,12 +233,14 @@ if __name__ == "__main__":
     )
 
     metadata = {}
+    update_metadata_with_args(args, metadata)
 
     tic = time.time()
     trainer.train(epochs=args.epochs)
     toc = time.time()
     print(f"Training complete ({toc-tic} s)")
-    metadata["train"] = toc - tic
+    metadata["train_time"] = toc - tic
+    metadata["train_size"] = trainer.train_data.get_total_size()
 
     import json
     import os
