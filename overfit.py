@@ -67,11 +67,11 @@ class Trainer:
         self.checkpoint_folder = checkpoint_folder
 
     def compute_loss(
-        self, gate_prediction, depth_prediction, true_gates, true_depth
+        self, n, gate_prediction, depth_prediction, true_gates, true_depth
     ) -> torch.Tensor:
-        return self.gate_loss(
-            gate_prediction, true_gates
-        ) + self.alpha * self.depth_loss(depth_prediction, true_depth.float())
+        return self.gate_loss(gate_prediction, true_gates) + self.alpha * (
+            self.depth_loss(depth_prediction, true_depth.float()) * 4 / (n**2) - 1
+        )
 
     def run_model(self, data, use_grad=True, use_eval=False):
         with torch.set_grad_enabled(use_grad):
@@ -114,6 +114,7 @@ class Trainer:
                 self.optimizer.zero_grad()
                 gate_prediction, depth_prediction = self.run_model(train_data)
                 loss = self.compute_loss(
+                    train_data["layout"].shape[1],  # n
                     gate_prediction,
                     depth_prediction,
                     torch.tensor(train_data["gate"], dtype=torch.int64).to(self.device),
@@ -240,7 +241,7 @@ if __name__ == "__main__":
     toc = time.time()
     print(f"Training complete ({toc-tic} s)")
     metadata["train_time"] = toc - tic
-    metadata["train_size"] = trainer.train_data.get_total_size()
+    metadata["train_size"] = int(trainer.train_data.get_total_size())
 
     import json
     import os
