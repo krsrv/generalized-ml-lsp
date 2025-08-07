@@ -3,13 +3,11 @@ Tools to split a given HDF5 file into training, test, validation (and potentiall
 """
 
 import os
+import re
 import time
 from functools import wraps
 
-import h5py
 import numpy as np
-
-from training.utils import prepare_hdf5_dataset, write_to_file
 
 
 def timeit(func):
@@ -27,13 +25,16 @@ def timeit(func):
 
 
 class Splitter:
+    keywords = ["gate", "depth", "observation", "layout", "gate_oh", "gate_qubit_oh"]
+    keyword_dtypes = [np.int_, np.int_, np.bool_, np.bool_, np.int_, np.int_]
+
     def __init__(self, files) -> None:
-        self.files = []
+        self.data = []
         for file in files:
-            if not file.endswith(".hdf5"):
+            if not file.endswith(".npz"):
                 continue
-            file = h5py.File(file, "r")
-            self.files.append(file)
+            data = np.load(file)
+            self.data.append(data)
 
         self.batch_size = None
         self.test_split = 0.10
@@ -42,194 +43,281 @@ class Splitter:
         self.hash_set = set()
 
     def generate_metadata(self) -> None:
-        self.per_file_metadata = {}
-        self.aggregate_metadata = {}
-        self.reverse_map = {}
+        self.aggregate_metadata = {}  # (n, g) -> size
+        self.per_file_metadata = {}  # (file_index, n, g) -> size
+        self.reverse_map_file = {}  # (n, g) -> [file_indices]
         self.total_size = 0
-        for i, file in enumerate(self.files):
-            for n in file.keys():
-                for g in file[n].keys():
-                    size = file[n][g]["n"].shape[0]
+        for i, data in enumerate(self.data):
+            for j, key in enumerate(data.keys()):
+                # The key should be of the form n/g/{data}
+                assert len(key.split("/")) == 3
+                n, g, keyword = key.split("/")
+
+                if (int(n), int(g)) not in self.aggregate_metadata:
+                    self.aggregate_metadata[(int(n), int(g))] = 0
+                    self.reverse_map_file[(int(n), int(g))] = []
+
+                if keyword == "depth":
+                    size = data[key].shape[0]
                     self.total_size += size
-
                     self.per_file_metadata[(i, int(n), int(g))] = size
-
-                    if (int(n), int(g)) not in self.aggregate_metadata:
-                        self.aggregate_metadata[(int(n), int(g))] = 0
-                        self.reverse_map[(int(n), int(g))] = []
+                    self.reverse_map_file[(int(n), int(g))].append(i)
                     self.aggregate_metadata[(int(n), int(g))] += size
-                    self.reverse_map[(int(n), int(g))].append(i)
 
     def set_batch_size(self, batch_size) -> None:
         self.batch_size = batch_size
+        self._calculate_batch_metadata()
 
-    def add_hash_from_hdf5(self, files) -> None:
-        for file in files:
-            with h5py.File(file, "r") as f:
-                for n in f.keys():
-                    for g in f.keys():
-                        for o in f[n][g]["observation"]:
-                            self.hash_set.add(calculate_hash(o))
+    def _calculate_batch_metadata(self) -> None:
+        # Calculate number of batches in data for each (n, g) tuple.
+        self.aggregate_num_batches = np.array(
+            [int(v // self.batch_size) for k, v in self.aggregate_metadata.items()]
+        )
+        self.aggregate_num_batches = self.aggregate_num_batches[
+            np.nonzero(self.aggregate_num_batches)
+        ]
+        # Get total number of batches (= TB) in dataset.
+        self.total_batches = np.sum(self.aggregate_num_batches)
 
-    @timeit
-    def generate_test_indices(self) -> int:
+    def _sample_batch_indices(self, size) -> tuple[np.ndarray, np.ndarray]:
         """
         Among all (n, g) tuples, calculate the indices of (n, g) tuples to sample along with the
         number of corresponding samples.
         """
         assert self.batch_size is not None
-        size_arr = np.array(
-            [int(v // self.batch_size) for k, v in self.aggregate_metadata.items()]
-        )
-        total_batches = np.sum(size_arr)
         self.test_size = int(
-            total_batches * self.test_split * self.batch_size
+            self.total_batches * self.test_split * self.batch_size
         )  # 10 * self.batch_size
+        # Pick the batch indices corresponding for test dataset (from 0, ..., TB-1).
         buff_idxs = np.sort(
             np.random.choice(
-                np.arange(total_batches),
-                self.test_size // self.batch_size,
+                np.arange(self.total_batches),
+                size // self.batch_size,
                 replace=False,
             )
         )
-        search_arr = np.cumsum(size_arr)
+        # Find the (n, g) tuple index corresponding to each batch index picked.
+        search_arr = np.cumsum(self.aggregate_num_batches)
         idxs = search_arr.searchsorted(buff_idxs, "right")
-        self.test_idxs, self.test_idx_counts = np.unique(idxs, return_counts=True)
-        return self.test_size
+        test_idxs, test_idx_counts = np.unique(idxs, return_counts=True)
+        return test_idxs, test_idx_counts
 
     @timeit
-    def generate_test_split(self, folder: str, file_prefix: str):
-        """
-        Given the indices of (n, g) tuples to sample along with the number of corresponding samples
-        (generated using `generate_test_indices`), calculate the exact physical indices
-        corresponding to the HDF5 file and index within the (n, g) group. Once these are calculated,
-        dump the contents to a new HDF5 file.
-        """
+    def generate_split(self, folder: str, file_prefix: str) -> None:
         assert self.batch_size is not None
-        output_file = f"{folder}/{file_prefix}-test.hdf5"
-        self.create_output_file(output_file)
-        keys = list(self.aggregate_metadata.keys())
+        ###########################################################################
+        # Among all (n, g) tuples, calculate the indices of (n, g) tuples
+        # to sample along with the number of corresponding samples.
+        ###########################################################################
+        # Calculate the size of each split.
+        self.test_size = int(
+            self.total_batches * self.test_split * self.batch_size
+        )  # 10 * self.batch_size
+        self.validation_size = int(
+            self.total_batches * self.validation_split * self.batch_size
+        )  # 10 * self.batch_size
+        self.train_size = self.total_size - self.test_size - self.validation_size
 
-        # self.test_idxs stores the (n, g) tuple index
-        # self.test_idx_counts stores the number of samples of samples to draw
-        for idx, count in zip(self.test_idxs, self.test_idx_counts):
-            n, g = keys[idx]
-            total_samples = self.aggregate_metadata[(n, g)]
-            # Generate the raw indices for sampling
-            buff_idxs = np.sort(
-                np.random.choice(
-                    np.arange(total_samples), count * self.batch_size, replace=False
-                )
+        # Sample batch indices corresponding to each split. The sampling is
+        # from (0, 1, ..., self.total_batches-1)
+        shuffled_indices = np.arange(self.total_batches)
+        np.random.shuffle(shuffled_indices)
+        test_batch_indices = shuffled_indices[: (self.test_size // self.batch_size)]
+        validation_batch_indices = shuffled_indices[
+            (self.test_size // self.batch_size) : (
+                (self.test_size + self.validation_size) // self.batch_size
             )
+        ]
+        train_batch_indices = shuffled_indices[
+            (self.test_size + self.validation_size) // self.batch_size :
+        ]
 
-            # Find the corresponding indices for file and entry within file
-            size_arr = np.array(
-                [self.per_file_metadata[(i, n, g)] for i in self.reverse_map[(n, g)]]
-            )
-            search_arr = np.cumsum(size_arr)
-            search_arr_idxs = search_arr.searchsorted(buff_idxs, "right")
-            list_idxs = buff_idxs - search_arr[search_arr_idxs]
-            file_idxs = np.array(self.reverse_map[(n, g)])[search_arr_idxs]
+        # Find the actual (n, g) tuple index corresponding to each batch index picked.
+        search_arr = np.cumsum(self.aggregate_num_batches)
+        test_ng_idxs, test_ng_num_batches = np.unique(
+            search_arr.searchsorted(test_batch_indices, "right"), return_counts=True
+        )
+        validation_ng_idxs, validation_ng_num_batches = np.unique(
+            search_arr.searchsorted(validation_batch_indices, "right"),
+            return_counts=True,
+        )
+        train_ng_idxs, train_ng_num_batches = np.unique(
+            search_arr.searchsorted(train_batch_indices, "right"), return_counts=True
+        )
+        print("Generated samples for split.")
 
-            # Dump the contents to file:
-            self.dump_to_file(n, g, file_idxs, list_idxs, output_file, add_to_hash=True)
-
-    @timeit
-    def generate_train_validation_split(
-        self, folder: str, file_prefix: str
-    ) -> tuple[int, int]:
-        """
-        Given a list of examples to avoid (via hashes), dump the remaining data into train and
-        validation HDF5 files probabilistically.
-        """
-        assert self.batch_size is not None
-        train_file = f"{folder}/{file_prefix}-train.hdf5"
-        validation_file = f"{folder}/{file_prefix}-validation.hdf5"
-        self.create_output_file(train_file)
-        self.create_output_file(validation_file)
-
-        keys = list(self.aggregate_metadata.keys())
-        train_count, validation_count = 0, 0
-
-        current_hash_set = np.array(list(self.hash_set))
-        for key in keys:
+        ###########################################################################
+        # test_ng_idxs contains the list of (n, g) indices to sample from.
+        # test_ng_num_batches contains the corresponding number of samples
+        # we need to draw. This data needs to be mapped to the actual data
+        # spread across files.
+        # First, for a given index and number of batches to sample, randomly
+        # sample indices to create the data. Then map the indices to actual
+        # file and within-file-offsets. Finally dump the data to file using
+        # the collected info.
+        ###########################################################################
+        print(f"Total number of keys to iterate over: {len(self.aggregate_metadata)}")
+        total_test_size, total_train_size, total_validation_size = 0, 0, 0
+        for idx, key in enumerate(self.aggregate_metadata.keys()):
             n, g = key
-            per_key_file_idxs = []
-            per_key_list_idxs = []
-            for i in self.reverse_map[(n, g)]:
-                file = self.files[i][f"{n}/{g}"]
-                all_idxs = np.arange(self.per_file_metadata[(i, n, g)])
-                # Find all the indices per file which do not collide with the hash set.
-                hashes = np.array(
-                    [calculate_hash(x) for x in file["observation"][all_idxs]]
-                )
-                mask = ~np.isin(hashes, current_hash_set)
-                indices = np.where(mask)[0]
-                per_key_list_idxs.append(indices)
-                per_key_file_idxs.append(np.ones_like(indices) * i)
+            if self.aggregate_metadata[key] < self.batch_size:
+                print(f"Skipping {n}/{g}: #examples < batch size")
+                continue
+            print(f"Running {n}/{g} ({idx})")
 
-            # Create the entire file and list idx
-            per_key_file_idxs = np.concat(per_key_file_idxs)
-            per_key_list_idxs = np.concat(per_key_list_idxs)
+            shuffled_indices = np.arange(self.aggregate_metadata[key])
+            np.random.shuffle(shuffled_indices)
 
-            # Randomly sample train and validation indices.
-            per_key_count = per_key_file_idxs.shape[0]
-            per_key_validation_size = int(per_key_count * self.validation_split)
-            per_key_train_size = per_key_count - per_key_validation_size
-            validation_idx = np.random.choice(
-                np.arange(per_key_count),
-                size=(per_key_validation_size,),
-                replace=False,
-            )
-            validation_idx_mask = np.zeros(per_key_count, dtype=bool)
-            validation_idx_mask[validation_idx] = True
-
-            # Dump contents to respective files
-            self.dump_to_file(
-                n,
-                g,
-                per_key_file_idxs[validation_idx_mask],
-                per_key_list_idxs[validation_idx_mask],
-                validation_file,
+            # Create test data.
+            test_size = self._get_sample_size(test_ng_idxs, test_ng_num_batches, idx)
+            file_idxs, offset_idxs = self.retrieve_offsets_from_indices(
+                n, g, np.sort(shuffled_indices[:test_size])
             )
             self.dump_to_file(
                 n,
                 g,
-                per_key_file_idxs[~validation_idx_mask],
-                per_key_list_idxs[~validation_idx_mask],
-                train_file,
+                file_idxs,
+                offset_idxs,
+                f"{folder}/tmp/{file_prefix}-{n}-{g}-test.npz",
             )
-            train_count += per_key_train_size
-            validation_count += per_key_validation_size
+            total_test_size += test_size
 
-        return train_count, validation_count
+            # Create validation data.
+            validation_size = self._get_sample_size(
+                validation_ng_idxs, validation_ng_num_batches, idx
+            )
+            file_idxs, offset_idxs = self.retrieve_offsets_from_indices(
+                n, g, np.sort(shuffled_indices[test_size : test_size + validation_size])
+            )
+            self.dump_to_file(
+                n,
+                g,
+                file_idxs,
+                offset_idxs,
+                f"{folder}/tmp/{file_prefix}-{n}-{g}-validation.npz",
+            )
+            total_validation_size += validation_size
+
+            # Create train data.
+            train_size = self._get_sample_size(train_ng_idxs, train_ng_num_batches, idx)
+            file_idxs, offset_idxs = self.retrieve_offsets_from_indices(
+                n, g, np.sort(shuffled_indices[test_size + validation_size :])
+            )
+            self.dump_to_file(
+                n,
+                g,
+                file_idxs,
+                offset_idxs,
+                f"{folder}/tmp/{file_prefix}-{n}-{g}-train.npz",
+            )
+            total_train_size += train_size
+
+        self.coalesce_files(folder, "tmp", file_prefix)
+        self.delete_temp_files(folder)
+        return total_test_size, total_validation_size, total_train_size
+
+    def retrieve_offsets_from_indices(self, n, g, idxs):
+        # Find the corresponding indices for file and entry within file
+        size_arr = np.array(
+            [self.per_file_metadata[(i, n, g)] for i in self.reverse_map_file[(n, g)]]
+        )
+        search_arr = np.cumsum(size_arr)
+        search_arr_idxs = search_arr.searchsorted(idxs, "right")
+        list_idxs = idxs - search_arr[search_arr_idxs]
+        file_idxs = np.array(self.reverse_map_file[(n, g)])[search_arr_idxs]
+        return file_idxs, list_idxs
 
     def dump_to_file(
-        self, n, g, file_idxs, list_idxs, output_file: str, add_to_hash: bool = False
+        self,
+        n: int,
+        g: int,
+        file_idxs: np.ndarray,
+        offset_idxs: np.ndarray,
+        filename: str,
     ) -> None:
-        """
-        Given a list of indices for files and entries, write the corresponding entries to the output
-        file. The function assumes that the (n, g) dataset has not been created in the file.
-        """
-        prepare_hdf5_dataset(output_file, n, g)
-        key = f"{n}/{g}"
-        for file_idx, list_idx in zip(file_idxs, list_idxs):
-            file = self.files[file_idx]
-            dset: h5py.Group = file[key]
-            dict_obj = {k: [dset[k][list_idx]] for k in dset.keys()}
-            if add_to_hash:
-                self.hash_set.add(calculate_hash(dset["observation"][list_idx]))
-            write_to_file(dict_obj, output_file, key)
+        os.makedirs(os.path.dirname(filename), exist_ok=True)
 
-    def create_output_file(self, file_name: str) -> None:
-        if not os.path.exists(file_name):
-            f = h5py.File(file_name, "w")
-            f.close()
-        else:
-            print(f"Warning!!!!!!! File {file_name} already exists")
-            os.remove(file_name)
-            f = h5py.File(file_name, "w")
-            f.close()
+        output = {
+            keyword: np.array([], dtype=dtype)
+            for keyword, dtype in zip(self.keywords, self.keyword_dtypes)
+        }
+
+        # Condense the file_idxs array into a smaller one without repitions.
+        file_idxs, counts = np.unique(file_idxs, return_counts=True)
+        counts = np.concatenate(([0], np.cumsum(counts)))
+        offset_idxs = [
+            offset_idxs[counts[i] : counts[i + 1]] for i in range(file_idxs.shape[0])
+        ]
+        for file_idx, offset_idx in zip(file_idxs, offset_idxs):
+            data = self.data[file_idx]
+            for keyword, dtype in zip(self.keywords, self.keyword_dtypes):
+                keyword_data = data[f"{n}/{g}/{keyword}"]
+                size = data[f"{n}/{g}/gate"].shape[0]
+                keyword_data = keyword_data.reshape((size, -1))
+                output[keyword] = np.concatenate(
+                    (
+                        output[keyword],
+                        keyword_data[offset_idx, :].reshape(-1).astype(dtype),
+                    )
+                )
+        np.savez_compressed(filename, **output)
+
+    @timeit
+    def coalesce_files(self, folder: str, tmp_dir: str, file_prefix: str) -> None:
+        test_files, train_files, validation_files = [], [], []
+        for file in os.listdir(f"{folder}/{tmp_dir}"):
+            if file.startswith(file_prefix) and len(file.split("-")) == 4:
+                if file.endswith("train.npz"):
+                    train_files.append(file)
+                elif file.endswith("validation.npz"):
+                    validation_files.append(file)
+                elif file.endswith("test.npz"):
+                    test_files.append(file)
+        for dataset, file_list in zip(
+            ["test", "train", "validation"], [test_files, train_files, validation_files]
+        ):
+            output = {}
+            for file in file_list:
+                data = np.load(f"{folder}/{tmp_dir}/{file}")
+                n, g = file.split("/")[-1].split("-")[1:3]
+                for keyword, dtype in zip(self.keywords, self.keyword_dtypes):
+                    key = f"{n}/{g}/{keyword}"
+                    if key not in output:
+                        output[key] = np.array([], dtype=dtype)
+                    output[f"{n}/{g}/{keyword}"] = np.concatenate(
+                        (
+                            output[f"{n}/{g}/{keyword}"],
+                            data[keyword],
+                        )
+                    )
+            np.savez_compressed(f"{folder}/{file_prefix}-{dataset}.npz", **output)
+
+    def delete_temp_files(self, folder: str) -> None:
+        tmp_folder = f"{folder}/tmp"
+        if os.path.exists(tmp_folder) and os.path.isdir(tmp_folder):
+            for root, dirs, files in os.walk(tmp_folder, topdown=False):
+                for name in files:
+                    os.remove(os.path.join(root, name))
+                for name in dirs:
+                    os.rmdir(os.path.join(root, name))
+            os.rmdir(tmp_folder)
+
+    def add_hash_from_file(self, file) -> None:
+        with np.load(file) as data:
+            for key in data.keys():
+                if not key.endswith("observation"):
+                    continue
+                gate_key = f"{key.split('/')[0]}/{key.split('/')[1]}/gate"
+                num_samples = data[gate_key].shape[0]
+                self.hash_set.add(data[key].reshape(-1, num_samples))
+
+    def _get_sample_size(
+        self, ng_idxs: np.ndarray, num_batches: np.ndarray, q: int
+    ) -> int:
+        idx = ng_idxs.searchsorted(q)
+        if idx >= len(ng_idxs) or ng_idxs[idx] != q:
+            return 0
+        return num_batches[idx] * self.batch_size
 
 
 def calculate_hash(input):
@@ -244,21 +332,16 @@ if __name__ == "__main__":
 
     splitter = Splitter(
         [
-            "training-data/compiled/night-run-extracted-0.hdf5",
-            # "training-data/compiled/night-run-extracted-1.hdf5",
-            # "training-data/compiled/night-run-extracted-2.hdf5",
-            # "training-data/compiled/night-run-extracted-3.hdf5",
-            # "training-data/compiled/night-run-extracted-4.hdf5",
-            # "training-data/compiled/night-run-extracted-5.hdf5",
+            "training-data/compiled/2-14_20000.npz",
+            "training-data/compiled/15-19_20000.npz",
         ]
     )
     print(f"Total size: {splitter.total_size}")
     splitter.set_batch_size(64)
-    test_size = splitter.generate_test_indices()
-    print(f"Test size: {test_size}")
-    prefix = "new-sample"
-    splitter.generate_test_split("training-data/compiled/hdf5", prefix)
-    train_size, validation_size = splitter.generate_train_validation_split(
-        "training-data/compiled/hdf5", prefix
+    prefix = "sample"
+    test_size, validation_size, train_size = splitter.generate_split(
+        "training-data/compiled", prefix
     )
-    print(f"Train, validation size: {train_size}, {validation_size}")
+    print(
+        f"(Test, Validation, Train) size: ({test_size}, {validation_size}, {train_size})"
+    )
