@@ -2,6 +2,9 @@
 Custom dataloader class for HDF5 files (where keys are `n/g/{key}`).
 """
 
+import time
+from functools import wraps
+
 import numpy as np
 
 
@@ -16,6 +19,20 @@ def _transform_graph(adjacency_matrix):
     return np.linalg.eigh(laplacian)
 
 
+def timeit(func):
+    @wraps(func)
+    def timeit_wrapper(*args, **kwargs):
+        start_time = time.perf_counter()
+        result = func(*args, **kwargs)
+        end_time = time.perf_counter()
+        total_time = end_time - start_time
+        # first item in the args, ie `args[0]` is `self`
+        print(f"Function {func.__name__}{args} {kwargs} Took {total_time:.4f} seconds")
+        return result
+
+    return timeit_wrapper
+
+
 class UnprepNpzDataloader:
     """
     Class to handle HDF5 files (where keys are `n/g/{key}`). The data is a collection of circuit
@@ -28,7 +45,7 @@ class UnprepNpzDataloader:
         super().__init__()
         self.load_file(file)
         self.construct_metadata()
-        self.shuffle = True
+        self.shuffle = shuffle
         self.batch_size = 64
 
     def load_file(self, file):
@@ -36,21 +53,6 @@ class UnprepNpzDataloader:
         Use only 1 file as input. Register the file as a member of the class.
         """
         self.data = np.load(file, "r")
-        data = self.data
-        for key in data.keys():
-            if key.endswith("gate") or key.endswith("depth"):
-                continue
-            gate_key = f"{key.split('/')[0]}/{key.split('/')[1]}/gate"
-            size = data[gate_key].shape[0]
-            n = int(key.split("/")[0])
-            if key.endswith("observation"):
-                self.data[key] = self.data[key].reshape((size, -1))
-            elif key.endswith("gate_oh"):
-                self.data[key] = self.data[key].reshape((size, -1))
-            elif key.endswith("gate_qubit_oh"):
-                self.data[key] = self.data[key].reshape((size, -1))
-            elif key.endswith("layout"):
-                self.data[key] = self.data[key].reshape((size, n, n))
 
     def construct_metadata(self):
         """
@@ -110,12 +112,14 @@ class UnprepNpzDataloader:
                 np.random.shuffle(idxs)
             for i in range(num_batches):
                 self.iter_order.append(
-                    (k, idxs[i * self.batch_size : (i + 1) * self.batch_size])
+                    (k, np.sort(idxs[i * self.batch_size : (i + 1) * self.batch_size]))
                 )
         if self.shuffle:
             np.random.shuffle(self.iter_order)
+        # print(self.iter_order[:5])
         return self
 
+    @timeit
     def __next__(self):
         """
         Return the next element in iter. The returned batch might not have `batch_size` elements, if
@@ -130,16 +134,27 @@ class UnprepNpzDataloader:
 
         # Return the data
         data = self.data
-        eval, evec = _transform_graph(data["layout"][idxs, :, :])
+        num_samples = data[f"{n}/{g}/gate"].shape[0]
+        # eval, evec = _transform_graph(
+        #     data[f"{n}/{g}/layout"].reshape((num_samples, n, n))[idxs, :, :]
+        # )
         object = {
-            "eigval": eval,
-            "eigvec": evec,
+            # "eigval": eval,
+            # "eigvec": evec,
             "gate_oh": data[f"{n}/{g}/gate_oh"][idxs, :],
-            "gate_qubit_oh": data["gate_qubit_oh"][idxs, :],
-            "observation": data["observation"][idxs, :],
-            "gate": data["gate"][idxs],
-            "depth": data["depth"][idxs],
+            # "gate_qubit_oh": data[f"{n}/{g}/gate_qubit_oh"][idxs],
+            # "observation": data[f"{n}/{g}/observation"][idxs],
+            # "gate_oh": data[f"{n}/{g}/gate_oh"].reshape((num_samples, -1))[idxs, :],
+            # "gate_qubit_oh": data[f"{n}/{g}/gate_qubit_oh"].reshape((num_samples, -1))[
+            #     idxs, :
+            # ],
+            # "observation": data[f"{n}/{g}/observation"].reshape((num_samples, -1))[
+            #     idxs, :
+            # ],
+            "gate": data[f"{n}/{g}/gate"][idxs],
+            "depth": data[f"{n}/{g}/depth"][idxs],
         }
+        self.iter_idx += 1
         return object
 
     def get_total_size(self):
