@@ -2,7 +2,6 @@
 Custom dataloader class for HDF5 files (where keys are `n/g/{key}`).
 """
 
-import h5py
 import numpy as np
 
 
@@ -17,7 +16,7 @@ def _transform_graph(adjacency_matrix):
     return np.linalg.eigh(laplacian)
 
 
-class UnprepHdf5Dataloader:
+class UnprepNpzDataloader:
     """
     Class to handle HDF5 files (where keys are `n/g/{key}`). The data is a collection of circuit
     layout, gate sets, input state and unpreparation unitary (just 1 gate). For now, the class
@@ -25,16 +24,33 @@ class UnprepHdf5Dataloader:
     TODO: Increase support to multiple files.
     """
 
-    def __init__(self, file: str):
+    def __init__(self, file: str, shuffle: bool = True):
         super().__init__()
-        self.load_files(file)
+        self.load_file(file)
         self.construct_metadata()
+        self.shuffle = True
+        self.batch_size = 64
 
-    def load_files(self, file):
+    def load_file(self, file):
         """
         Use only 1 file as input. Register the file as a member of the class.
         """
-        self.file = h5py.File(file, "r")
+        self.data = np.load(file, "r")
+        data = self.data
+        for key in data.keys():
+            if key.endswith("gate") or key.endswith("depth"):
+                continue
+            gate_key = f"{key.split('/')[0]}/{key.split('/')[1]}/gate"
+            size = data[gate_key].shape[0]
+            n = int(key.split("/")[0])
+            if key.endswith("observation"):
+                self.data[key] = self.data[key].reshape((size, -1))
+            elif key.endswith("gate_oh"):
+                self.data[key] = self.data[key].reshape((size, -1))
+            elif key.endswith("gate_qubit_oh"):
+                self.data[key] = self.data[key].reshape((size, -1))
+            elif key.endswith("layout"):
+                self.data[key] = self.data[key].reshape((size, n, n))
 
     def construct_metadata(self):
         """
@@ -47,16 +63,24 @@ class UnprepHdf5Dataloader:
         self.aggregate_metadata = {}
         self.reverse_map = {}
         total = 0
-        file = self.file
-        for n in file.keys():
-            for g in file[n].keys():
-                size = file[n][g]["n"].shape[0]
-                total += size
-                self.aggregate_metadata[(int(n), int(g))] = size
+        data = self.data
+        for key in data.keys():
+            if not key.endswith("gate"):
+                continue
+            size = data[key].shape[0]
+            total += size
+            n, g, _ = key.split("/")
+            self.aggregate_metadata[(int(n), int(g))] = size
         self.size_list = np.array([v for v in self.aggregate_metadata.values()])
         self.p = self.size_list / np.sum(self.size_list)
 
         self.ng_list = list(self.aggregate_metadata.keys())
+
+    def set_batch_size(self, batch_size):
+        """
+        Manually set the `batch_size` in the iter.
+        """
+        self.batch_size = batch_size
 
     def random_sample_ng(self, batch_size=64):
         """
@@ -72,99 +96,51 @@ class UnprepHdf5Dataloader:
             size = self.file[f"{n}/{g}"]["layout"].shape[0]
         return self.ng_list[idx]
 
-    def random_sample_data(self, n, g, batch_size=64):
-        """
-        Given (n, g), randomly sample the datapoints under (n, g) according to the batch_size.
-        """
-        data: h5py.Group = self.file[f"{n}/{g}"]
-        n_samples = data["layout"].shape[0]
-        assert (
-            n_samples >= batch_size
-        ), f"Number of training samples ({n_samples}) is less than the batch size ({batch_size})"
-        idxs = np.sort(
-            np.random.choice(np.arange(0, n_samples), batch_size, replace=False)
-        )
-        eval, evec = _transform_graph(data["layout"][idxs, :, :])
-        return {
-            "eigval": eval,
-            "eigvec": evec,
-            "gate_oh": data["gate_oh"][idxs, :, :],
-            "gate_qubit_oh": data["gate_qubit_oh"][idxs, :, :],
-            "observation": data["observation"][idxs, :],
-            "gate": data["gate"][idxs],
-            "depth": data["depth"][idxs],
-        }
-
     def __iter__(self):
-        self.ng_iter_idx = 0
-        self.batch_idx = 0
-        self.batch_size = 64
+        self.iter_idx = 0
+        # Set the iteration order
+        self.iter_order = []
+        for k, v in self.aggregate_metadata.items():
+            n, g = k
+            num_batches = int(v // self.batch_size)
+            if num_batches == 0:
+                continue
+            idxs = np.arange(v)
+            if self.shuffle:
+                np.random.shuffle(idxs)
+            for i in range(num_batches):
+                self.iter_order.append(
+                    (k, idxs[i * self.batch_size : (i + 1) * self.batch_size])
+                )
+        if self.shuffle:
+            np.random.shuffle(self.iter_order)
         return self
-
-    def set_ng_iter_idx(self, ng_idx):
-        """
-        Manually set the (n, g) index in the iter.
-        """
-        self.ng_iter_idx = ng_idx
-
-    def set_batch_size(self, batch_size):
-        """
-        Manually set the `batch_size` in the iter.
-        """
-        self.batch_size = batch_size
 
     def __next__(self):
         """
         Return the next element in iter. The returned batch might not have `batch_size` elements, if
         there are fewer than `batch_size` elements remaining in the (n, g) dataset.
         """
-        if self.ng_iter_idx >= len(self.ng_list):
+        if self.iter_idx >= len(self.iter_order):
             raise StopIteration
 
         # Extract the current (n, g) key
-        n, g = self.ng_list[self.ng_iter_idx]
-        max_size = self.aggregate_metadata[(n, g)]
-        # Avoid iterating over empty datasets.
-        while max_size == 0:
-            self.ng_iter_idx += 1
-            if self.ng_iter_idx >= len(self.ng_list):
-                raise StopIteration
-            n, g = self.ng_list[self.ng_iter_idx]
-            max_size = self.aggregate_metadata[(n, g)]
-
-        # Set the start and end indices
-        if self.batch_idx + self.batch_size >= max_size:
-            start_idx, end_idx = self.batch_idx, max_size
-            self.batch_idx = 0
-            self.ng_iter_idx += 1
-        else:
-            start_idx, end_idx = self.batch_idx, self.batch_idx + self.batch_size
-            self.batch_idx = end_idx
+        k, idxs = self.iter_order[self.iter_idx]
+        n, g = k
 
         # Return the data
-        data = self.file[f"{n}/{g}"]
-        eval, evec = _transform_graph(data["layout"][start_idx:end_idx, :, :])
+        data = self.data
+        eval, evec = _transform_graph(data["layout"][idxs, :, :])
         object = {
             "eigval": eval,
             "eigvec": evec,
-            "gate_oh": data["gate_oh"][start_idx:end_idx, :, :],
-            "gate_qubit_oh": data["gate_qubit_oh"][start_idx:end_idx, :, :],
-            "observation": data["observation"][start_idx:end_idx, :],
-            "gate": data["gate"][start_idx:end_idx],
-            "depth": data["depth"][start_idx:end_idx],
+            "gate_oh": data[f"{n}/{g}/gate_oh"][idxs, :],
+            "gate_qubit_oh": data["gate_qubit_oh"][idxs, :],
+            "observation": data["observation"][idxs, :],
+            "gate": data["gate"][idxs],
+            "depth": data["depth"][idxs],
         }
         return object
 
     def get_total_size(self):
         return np.sum(self.size_list)
-
-    def __len__(self):
-        return len(self.ng_list)
-
-    def __getitem__(self, index):
-        """
-        Assumes `index` is of the form (n, g, offset)
-        """
-        n, g, index = index
-        data = self.files[f"{n}/{g}"]
-        return data["layout"][index, :, :]
