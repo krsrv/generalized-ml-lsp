@@ -3,28 +3,11 @@ import os
 import h5py
 import numpy as np
 
-from training.utils import prepare_hdf5_dataset, write_to_file
-
-
-def new_dump_object() -> dict:
-    """
-    Generate the leaf object to dump in the HDF5 file.
-    """
-    return {
-        "n": [],
-        "layout": [],
-        "gate_oh": [],
-        "gate_qubit_oh": [],
-        "depth": [],
-        "gate": [],
-        "observation": [],
-    }
-
 
 class UnprepDataExtractor:
     """
-    Given an HDF5 file with keys `n/g/d/{key}`, which corresponds to a (gate sequence, state)
-    data, pull out the last gate to create an unpreparation dataset (gate sequence[-1], state).
+    Given an npz file with keys `/n/g/hash/{key}`, collapse the hash level to create an
+    unpreparation dataset with keys `/n/g/{key}`.
     """
 
     def __init__(self, file: str) -> None:
@@ -40,42 +23,29 @@ class UnprepDataExtractor:
             os.remove(output_file)
 
         keys = list(self.data.keys())
+        # Original keys are "/n/g/hash/{keyword}"
         ng_set = set(x.split("/")[1] + "/" + x.split("/")[2] for x in keys)
+        # Prepare the output arrays.
         ng_dict = {}
         for key in ng_set:
             ng_dict[key + "/gate"] = np.array([], dtype=np.int_)
-            ng_dict[key + "/depth"] = []
-            ng_dict[key + "/observation"] = []
-            ng_dict[key + "/layout"] = []
-            ng_dict[key + "/gate_oh"] = []
-            ng_dict[key + "/gate_qubit_oh"] = []
+            ng_dict[key + "/depth"] = np.array([], dtype=np.int_)
+            ng_dict[key + "/observation"] = np.array([], dtype=np.bool_)
+            ng_dict[key + "/layout"] = np.array([], dtype=np.bool_)
+            ng_dict[key + "/gate_oh"] = np.array([], dtype=np.int_)
+            ng_dict[key + "/gate_qubit_oh"] = np.array([], dtype=np.int_)
+
+        # Collect data into the new output arrays.
         for key in keys:
             ng = key.split("/")[1] + "/" + key.split("/")[2]
-            case_key = key.split("/")[4]
-            if case_key == "gate":
-                ng_dict[ng + "/gate"] = np.concatenate(
-                    (ng_dict[ng + "/gate"], np.array(self.data[key]))
-                )
-            elif case_key == "depth":
-                ng_dict[ng + "/depth"] = np.concatenate(
-                    (ng_dict[ng + "/depth"], np.array(self.data[key]))
-                )
-            elif case_key == "observation":
-                ng_dict[ng + "/observation"] = np.concatenate(
-                    (ng_dict[ng + "/observation"], np.array(self.data[key]))
-                )
-            elif case_key == "layout":
-                ng_dict[ng + "/layout"] = np.concatenate(
-                    (ng_dict[ng + "/layout"], np.array(self.data[key]))
-                )
-            elif case_key == "gate_oh":
-                ng_dict[ng + "/gate_oh"] = np.concatenate(
-                    (ng_dict[ng + "/gate_oh"], np.array(self.data[key]))
-                )
-            elif case_key == "gate_qubit_oh":
-                ng_dict[ng + "/gate_qubit_oh"] = np.concatenate(
-                    (ng_dict[ng + "/gate_qubit_oh"], np.array(self.data[key]))
-                )
+            keyword = key.split("/")[4]
+            if keyword == "n":
+                continue
+            ng_dict[ng + "/" + keyword] = np.concatenate(
+                (ng_dict[ng + "/" + keyword], np.array(self.data[key]))
+            )
+
+        # Convert to np arrays
         for key in ng_dict.keys():
             try:
                 ng_dict[key] = np.array(ng_dict[key])
@@ -91,14 +61,15 @@ class UnprepDataExtractor:
 if __name__ == "__main__":
     import time
 
-    np.savez_compressed("training-data/2-14", a=np.array([1, 2, 3, 4]))
     input_files = [
-        # "training-data/2-14_20000.npz",
-        "training-data/15-19_20000.npz",
+        # "training-data/2-4_20000.npz",
+        "training-data/19-20_20000.npz",
+        # "training-data/11-14_20000.npz",
     ]
     output_files = [
-        # "training-data/compiled/2-14_20000",
-        "training-data/compiled/15-19_20000",
+        # "training-data/compiled/2-4_20000",
+        "training-data/compiled/19-20_20000",
+        # "training-data/compiled/11-14_20000",
     ]
     for input_file, output_file in zip(input_files, output_files):
         tic = time.time()

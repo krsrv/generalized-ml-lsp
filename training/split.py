@@ -26,7 +26,7 @@ def timeit(func):
 
 class Splitter:
     keywords = ["gate", "depth", "observation", "layout", "gate_oh", "gate_qubit_oh"]
-    keyword_dtypes = [np.int_, np.int_, np.bool_, np.bool_, np.int_, np.int_]
+    keyword_dtypes = [np.int16, np.int16, np.bool_, np.bool_, np.int8, np.int8]
 
     def __init__(self, files) -> None:
         self.data = []
@@ -76,7 +76,7 @@ class Splitter:
         self.aggregate_num_batches = self.aggregate_num_batches[
             np.nonzero(self.aggregate_num_batches)
         ]
-        # Get total number of batches (= TB) in dataset.
+        # Get total number of batches in dataset.
         self.total_batches = np.sum(self.aggregate_num_batches)
 
     def _sample_batch_indices(self, size) -> tuple[np.ndarray, np.ndarray]:
@@ -122,15 +122,21 @@ class Splitter:
         # from (0, 1, ..., self.total_batches-1)
         shuffled_indices = np.arange(self.total_batches)
         np.random.shuffle(shuffled_indices)
-        test_batch_indices = shuffled_indices[: (self.test_size // self.batch_size)]
-        validation_batch_indices = shuffled_indices[
-            (self.test_size // self.batch_size) : (
-                (self.test_size + self.validation_size) // self.batch_size
-            )
-        ]
-        train_batch_indices = shuffled_indices[
-            (self.test_size + self.validation_size) // self.batch_size :
-        ]
+        test_batch_indices = np.sort(
+            shuffled_indices[: (self.test_size // self.batch_size)]
+        )
+        validation_batch_indices = np.sort(
+            shuffled_indices[
+                (self.test_size // self.batch_size) : (
+                    (self.test_size + self.validation_size) // self.batch_size
+                )
+            ]
+        )
+        train_batch_indices = np.sort(
+            shuffled_indices[
+                (self.test_size + self.validation_size) // self.batch_size :
+            ]
+        )
 
         # Find the actual (n, g) tuple index corresponding to each batch index picked.
         search_arr = np.cumsum(self.aggregate_num_batches)
@@ -332,13 +338,15 @@ if __name__ == "__main__":
 
     splitter = Splitter(
         [
-            "training-data/compiled/2-14_20000.npz",
-            "training-data/compiled/15-19_20000.npz",
+            "training-data/compiled/2-10_20000.npz",
+            "training-data/compiled/11-14_20000.npz",
+            "training-data/compiled/15-18_20000.npz",
+            "training-data/compiled/19-20_20000.npz",
         ]
     )
     print(f"Total size: {splitter.total_size}")
     splitter.set_batch_size(64)
-    prefix = "sample"
+    prefix = "new-sample"
     test_size, validation_size, train_size = splitter.generate_split(
         "training-data/compiled", prefix
     )
