@@ -8,6 +8,8 @@ from .input import GT_1Q, GT_2Q, Layout
 from .tokens import TokenProperties, Tokens
 from .utils import create_oh_vectors_from_enum
 
+NUM_GATE_TYPES = 9
+
 
 def _pad_last_dim(tensor: Tensor, pad_size: int) -> Tensor:
     return F.pad(tensor, (0, pad_size), "constant", 0)
@@ -91,7 +93,7 @@ class GateEmbedding(nn.Module):
         super().__init__()
         # Use nn.Linear for proper initialization.
         self.embedding_dim = embedding_dim
-        self.num_classes = len(GT_1Q) + len(GT_2Q)
+        self.num_classes = NUM_GATE_TYPES
         self.layer = nn.Linear(self.num_classes, embedding_dim, bias=False)
 
     def forward(
@@ -200,7 +202,7 @@ class GateProjectionLayer(nn.Module):
         self.softmax = nn.Softmax(-1)
 
     def forward(self, x: Tensor) -> Tensor:
-        return self.softmax(torch.squeeze(self.gate_prediction_layer(x), -1))
+        return torch.squeeze(self.gate_prediction_layer(x), -1)
 
 
 class ResidualLayer(nn.Module):

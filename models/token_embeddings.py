@@ -4,12 +4,12 @@ import torch.nn.functional as F
 from torch import Tensor
 
 from .embeddings import (
+    NUM_GATE_TYPES,
     GateEmbedding,
     PositionalEncoding,
     SignEmbedding,
     TableauCellEmbedding,
 )
-from .input import GT_1Q, GT_2Q, Layout
 from .tokens import TokenProperties
 
 
@@ -71,7 +71,26 @@ class Token_C_Embedding(nn.Module):
         super().__init__()
         self.gate_embedding_layer = GateEmbedding(token_dims.C_gt_1q_dim)
 
-    def forward(self, gates_oh: Tensor, gate_qubits_oh: Tensor, qubits: Tensor):
+    def get_one_hot_embedding_for_qubit(self, n: int, inp: Tensor):
+        output = F.one_hot(inp, num_classes=n + 1)
+        return output.narrow(-1, 1, output.shape[-1] - 1)
+
+    def forward(
+        self, n: Tensor, gates_oh: Tensor, gate_qubits_oh: Tensor, qubits: Tensor
+    ):
+        gates_oh = F.one_hot(gates_oh, num_classes=NUM_GATE_TYPES)
+        gate_qubits_oh = gate_qubits_oh.reshape((*gate_qubits_oh.shape[:-1], -1, 2))
+        gate_qubits_oh = torch.concatenate(
+            (
+                self.get_one_hot_embedding_for_qubit(
+                    n[0, 0].item(), gate_qubits_oh[:, :, 0]
+                ),
+                self.get_one_hot_embedding_for_qubit(
+                    n[0, 0].item(), gate_qubits_oh[:, :, 0]
+                ),
+            ),
+            dim=-1,
+        )
         return self.gate_embedding_layer(gates_oh, gate_qubits_oh, qubits)
 
 
