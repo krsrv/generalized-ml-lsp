@@ -119,7 +119,7 @@ class UnprepNpzDataloader:
         # print(self.iter_order[:5])
         return self
 
-    @timeit
+    # @timeit
     def __next__(self):
         """
         Return the next element in iter. The returned batch might not have `batch_size` elements, if
@@ -135,22 +135,20 @@ class UnprepNpzDataloader:
         # Return the data
         data = self.data
         num_samples = data[f"{n}/{g}/gate"].shape[0]
-        # eval, evec = _transform_graph(
-        #     data[f"{n}/{g}/layout"].reshape((num_samples, n, n))[idxs, :, :]
-        # )
+        eval, evec = _transform_graph(
+            data[f"{n}/{g}/layout"].reshape((num_samples, n, n))[idxs, :, :]
+        )
         object = {
-            # "eigval": eval,
-            # "eigvec": evec,
-            "gate_oh": data[f"{n}/{g}/gate_oh"][idxs, :],
-            # "gate_qubit_oh": data[f"{n}/{g}/gate_qubit_oh"][idxs],
-            # "observation": data[f"{n}/{g}/observation"][idxs],
-            # "gate_oh": data[f"{n}/{g}/gate_oh"].reshape((num_samples, -1))[idxs, :],
-            # "gate_qubit_oh": data[f"{n}/{g}/gate_qubit_oh"].reshape((num_samples, -1))[
-            #     idxs, :
-            # ],
-            # "observation": data[f"{n}/{g}/observation"].reshape((num_samples, -1))[
-            #     idxs, :
-            # ],
+            "layout": data[f"{n}/{g}/layout"].reshape((num_samples, n, n))[idxs, :, :],
+            "eigval": eval,
+            "eigvec": evec,
+            "gate_oh": data[f"{n}/{g}/gate_oh"].reshape((num_samples, -1))[idxs, :],
+            "gate_qubit_oh": data[f"{n}/{g}/gate_qubit_oh"].reshape((num_samples, -1))[
+                idxs, :
+            ],
+            "observation": data[f"{n}/{g}/observation"].reshape((num_samples, -1))[
+                idxs, :
+            ],
             "gate": data[f"{n}/{g}/gate"][idxs],
             "depth": data[f"{n}/{g}/depth"][idxs],
         }

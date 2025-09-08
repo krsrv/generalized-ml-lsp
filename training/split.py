@@ -272,7 +272,7 @@ class Splitter:
     def coalesce_files(self, folder: str, tmp_dir: str, file_prefix: str) -> None:
         test_files, train_files, validation_files = [], [], []
         for file in os.listdir(f"{folder}/{tmp_dir}"):
-            if file.startswith(file_prefix) and len(file.split("-")) == 4:
+            if file.startswith(file_prefix):
                 if file.endswith("train.npz"):
                     train_files.append(file)
                 elif file.endswith("validation.npz"):
@@ -285,7 +285,7 @@ class Splitter:
             output = {}
             for file in file_list:
                 data = np.load(f"{folder}/{tmp_dir}/{file}")
-                n, g = file.split("/")[-1].split("-")[1:3]
+                n, g = file.split("/")[-1].split("-")[-3:-1]
                 for keyword, dtype in zip(self.keywords, self.keyword_dtypes):
                     key = f"{n}/{g}/{keyword}"
                     if key not in output:
@@ -338,7 +338,8 @@ if __name__ == "__main__":
 
     splitter = Splitter(
         [
-            "training-data/compiled/2-10_20000.npz",
+            "training-data/compiled/2-5_20000.npz",
+            "training-data/compiled/6-10_20000.npz",
             "training-data/compiled/11-14_20000.npz",
             "training-data/compiled/15-18_20000.npz",
             "training-data/compiled/19-20_20000.npz",
