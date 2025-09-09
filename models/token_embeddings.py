@@ -85,8 +85,9 @@ class Token_C_Embedding(nn.Module):
                 self.get_one_hot_embedding_for_qubit(
                     n[0, 0].item(), gate_qubits_oh[:, :, 0]
                 ),
+                # Potentially a bug? Check the data.
                 self.get_one_hot_embedding_for_qubit(
-                    n[0, 0].item(), gate_qubits_oh[:, :, 0]
+                    n[0, 0].item(), gate_qubits_oh[:, :, 1]
                 ),
             ),
             dim=-1,
