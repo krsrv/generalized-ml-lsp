@@ -8,7 +8,7 @@ import torch.nn as nn
 import torch.optim as optim
 
 from models.model_v0 import ModelV0
-from training.dataset import UnprepHdf5Dataloader
+from training.dataset import UnprepNpzDataloader
 
 seed = time.time_ns()
 
@@ -23,8 +23,6 @@ class Trainer:
     def __init__(
         self,
         train_file,
-        validation_file,
-        test_file,
         checkpoint_folder,
         lr=0.001,
         betas=(0.9, 0.999),
@@ -40,23 +38,11 @@ class Trainer:
         )
         self.optimizer = optim.Adam(self.model.parameters(), lr=lr, betas=betas)
 
-        self.train_data = UnprepHdf5Dataloader(train_file)
-        self.validation_data = (
-            UnprepHdf5Dataloader(validation_file)
-            if validation_file is not None
-            else None
-        )
-        self.test_data = (
-            UnprepHdf5Dataloader(test_file) if test_file is not None else None
-        )
+        # Initialize the dataloaders
+        self.train_data = UnprepNpzDataloader(train_file, shuffle=False)
+
         print("Total sizes of datasets:")
         print(f"Train - {self.train_data.get_total_size()}")
-        print(
-            f"Validation - {self.validation_data.get_total_size() if self.validation_data is not None else 0}"
-        )
-        print(
-            f"Test - {self.test_data.get_total_size() if self.test_data is not None else 0}"
-        )
 
         self.batch_size = 64
 
@@ -68,9 +54,9 @@ class Trainer:
 
     def compute_loss(
         self, n, gate_prediction, depth_prediction, true_gates, true_depth
-    ) -> torch.Tensor:
-        return self.gate_loss(gate_prediction, true_gates) + self.alpha * (
-            self.depth_loss(depth_prediction, true_depth.float()) * 4 / (n**2) - 1
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.gate_loss(gate_prediction, true_gates), self.alpha * (
+            self.depth_loss(depth_prediction, true_depth.float() * 4 / (n**2) - 1)
         )
 
     def run_model(self, data, use_grad=True, use_eval=False):
@@ -80,8 +66,8 @@ class Trainer:
             gate_prediction, depth_prediction = self.model.forward(
                 torch.tensor(data["eigval"], dtype=torch.float).to(self.device),
                 torch.tensor(data["eigvec"], dtype=torch.float).to(self.device),
-                torch.tensor(data["gate_oh"], dtype=torch.bool).to(self.device),
-                torch.tensor(data["gate_qubit_oh"], dtype=torch.bool).to(self.device),
+                torch.tensor(data["gate_oh"], dtype=torch.long).to(self.device),
+                torch.tensor(data["gate_qubit_oh"], dtype=torch.long).to(self.device),
                 torch.tensor(data["observation"], dtype=torch.bool).to(self.device),
             )
             if use_eval:
@@ -97,63 +83,52 @@ class Trainer:
 
     def train(self, epochs=1):
         self.set_device()
-        validation_loss_history = []
+        gate_loss_history, depth_loss_history = [], []
         training_loss_history = []
 
-        self.train_data.set_ng_iter_idx(0)  # corresponding to (n, g) = (3, 7)
-        iterator = iter(self.train_data)
-        self.train_data.set_batch_size(
-            self.batch_size
-        )  # Batch size needs to be set after the iterator is initialized
-        train_data = next(iterator)
+        train_data = next(iter(self.train_data))
 
-        total_size = self.train_data.get_total_size()
         for epoch in range(epochs):
-            n_iter = int(total_size // self.batch_size)  #
-            for i in range(n_iter):
-                self.optimizer.zero_grad()
-                gate_prediction, depth_prediction = self.run_model(train_data)
-                loss = self.compute_loss(
-                    train_data["layout"].shape[1],  # n
-                    gate_prediction,
-                    depth_prediction,
-                    torch.tensor(train_data["gate"], dtype=torch.int64).to(self.device),
-                    torch.tensor(train_data["depth"], dtype=torch.int64).to(
-                        self.device
-                    ),
-                )
-                loss.backward()
-                self.optimizer.step()
-                training_loss_history.append(loss.detach().cpu().item())
-
-                if i % 500 == 0:
-                    self.dump_loss_history(training_loss_history)
-                    print(f"Completed {i} iters, {epoch} epochs")
-
-            # Also store at the end of the model
-            self.dump_loss_history(training_loss_history)
-
-    def calculate_validation_score(self):
-        self.set_device()
-        total_loss = 0.0
-        total_samples = 0
-        for data in iter(self.validation_data):
-            gate_prediction, depth_prediction = self.run_model(data, use_grad=False)
-            loss = self.compute_loss(
+            self.optimizer.zero_grad()
+            gate_prediction, depth_prediction = self.run_model(train_data)
+            gate_loss, depth_loss = self.compute_loss(
+                train_data["eigval"].shape[1],  # n
                 gate_prediction,
                 depth_prediction,
-                torch.tensor(data["gate"], dtype=torch.int64).to(self.device),
-                torch.tensor(data["gate"], dtype=torch.int64).to(self.device),
+                torch.tensor(train_data["gate"], dtype=torch.int64).to(self.device),
+                torch.tensor(train_data["depth"], dtype=torch.int64).to(self.device),
             )
-            batch_size = data["gate"].shape[0]
-            total_loss += loss.cpu().item() * batch_size
-            total_samples += batch_size
-        average_loss = total_loss / total_samples
-        return average_loss
+            loss = gate_loss + depth_loss
+            loss.backward()
+            self.optimizer.step()
+            training_loss_history.append(loss.detach().cpu().item())
+            gate_loss_history.append(gate_loss.detach().cpu().item())
+            depth_loss_history.append(depth_loss.detach().cpu().item())
 
-    def dump_loss_history(self, loss_history):
+            if epoch % 500 == 0:
+                self.dump_loss_history(
+                    training_loss_history, gate_loss_history, depth_loss_history
+                )
+                print(f"Completed {epoch} epochs")
+
+        # Also store at the end of the model
+        self.dump_loss_history(
+            training_loss_history, gate_loss_history, depth_loss_history
+        )
+
+    def dump_loss_history(
+        self, loss_history, gate_loss_history=None, depth_loss_history=None
+    ):
         file = f"{self.checkpoint_folder}/training_loss.npy"
         np.save(file, np.array(loss_history))
+        if gate_loss_history is not None:
+            np.save(
+                f"{self.checkpoint_folder}/gate_loss.npy", np.array(gate_loss_history)
+            )
+        if depth_loss_history is not None:
+            np.save(
+                f"{self.checkpoint_folder}/depth_loss.npy", np.array(depth_loss_history)
+            )
 
     def store_checkpoint(self, epoch, iter_idx, validation_loss, train_loss):
         torch.save(
@@ -162,7 +137,6 @@ class Trainer:
                 "iter_idx": iter_idx,
                 "model_state_dict": self.model.state_dict(),
                 "optimizer_state_dict": self.optimizer.state_dict(),
-                "validation_loss": validation_loss,
                 "loss": train_loss,
             },
             f"{self.checkpoint_folder}/model-{epoch}-{iter_idx}.pt",
@@ -209,25 +183,19 @@ if __name__ == "__main__":
 
     if args.device == "hpc":
         train_file = "/scratch1/sauravk/lsp-hdf5/sample-train.hdf5"
-        validation_file = "/scratch1/sauravk/lsp-hdf5/sample-validation.hdf5"
-        test_file = "/scratch1/sauravk/lsp-hdf5/sample-test.hdf5"
         model_output_folder = create_new_folder("/scratch1/sauravk/models", args)
     elif args.device == "mac":
         train_file = "training-data/compiled/hdf5/sample-train.hdf5"
-        validation_file = "training-data/compiled/hdf5/sample-validation.hdf5"
-        test_file = "training-data/compiled/hdf5/sample-test.hdf5"
         model_output_folder = create_new_folder("output", args)
     elif args.device == "qserver":
-        train_file = "training-data/compiled/hdf5/sample-train.hdf5"
-        validation_file = "training-data/compiled/hdf5/sample-validation.hdf5"
-        test_file = "training-data/compiled/hdf5/sample-test.hdf5"
+        train_file = "training-data/compiled/new-sample-train.npz"
         model_output_folder = create_new_folder("output", args)
     print(f"Output folder: {model_output_folder}")
 
+    seed = 1
+    np.random.seed(1)
     trainer = Trainer(
         train_file,
-        validation_file,
-        test_file,
         model_output_folder,
         lr=args.lr,
         betas=(args.beta1, args.beta2),
