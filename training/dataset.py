@@ -3,6 +3,7 @@ Custom dataloader class for HDF5 files (where keys are `n/g/{key}`).
 """
 
 import time
+from collections import defaultdict
 from functools import wraps
 
 import numpy as np
@@ -48,11 +49,20 @@ class UnprepNpzDataloader:
         self.shuffle = shuffle
         self.batch_size = 64
 
+    @timeit
     def load_file(self, file):
         """
         Use only 1 file as input. Register the file as a member of the class.
         """
         self.data = np.load(file, "r")
+        self.cache = defaultdict(dict)
+
+        for key in self.data:
+            parts = key.split("/")
+            if len(parts) == 3:
+                n, g, d = parts
+                group_key = f"{n}/{g}"
+                self.cache[group_key][d] = self.data[key]  # loads into memory
 
     def construct_metadata(self):
         """
@@ -124,6 +134,30 @@ class UnprepNpzDataloader:
         """
         Return the next element in iter. The returned batch might not have `batch_size` elements, if
         there are fewer than `batch_size` elements remaining in the (n, g) dataset.
+
+        Description of the data (for num_samples = 1):
+        layout: (n, n) = Adjacency matrix
+        eigval: (n) = Eigenvalues of the Laplacian matrix
+        eigvec: (n, n) = Eigenvectors of the Laplacian matrix
+        gate_oh: (g) = gate instances
+        gate_qubit_oh: (2*g) = qubits involved in the gate instances
+        observation: (2 * n * n + n) = Observation of the target state
+        gate: (1) = Gate index
+        depth: (1) = Depth of the circuit
+
+        Example for n = 3, layout = fully connected, gate set = {H=0, CNOT=1, CZ=2}
+        layout: [[0, 1, 1], [1, 0, 1], [1, 1, 0]]
+        gate_oh: [0, 0, 0, 1, 1, 1, 1, 1, 1, 2, 2, 2]
+            Explanation: 3 Hadamard, 6 CNOT, 3 CZ gate instances
+        gate_qubit_oh: [1, 0, 2, 0, 3, 0, 2, 1, 3, 1, 3, 2, 1, 2, 1, 3, 2, 3, 2, 1, 3, 1, 3, 2]
+            Explanation: Each gate has 2 qubits for its gate instance. The second qubit is 0 if
+                it's a single qubit gate. The first 6 correspond to Hadamard, next 12 to CNOT and
+                last 6 to CZ.
+        observation: [[1,0,0,0,0,0,0], [0,0,0,0,1,0,0], [0,0,1,0,0,1,1]]
+            Explanation: Each row is [X, Z, sign], in reverse ordering of qubits, i.e., right most
+            column is the first qubit.
+        gate: 10
+        depth: 3
         """
         if self.iter_idx >= len(self.iter_order):
             raise StopIteration
@@ -133,24 +167,20 @@ class UnprepNpzDataloader:
         n, g = k
 
         # Return the data
-        data = self.data
-        num_samples = data[f"{n}/{g}/gate"].shape[0]
+        data = self.cache[f"{n}/{g}"]
+        num_samples = data[f"gate"].shape[0]
         eval, evec = _transform_graph(
-            data[f"{n}/{g}/layout"].reshape((num_samples, n, n))[idxs, :, :]
+            data[f"layout"].reshape((num_samples, n, n))[idxs, :, :]
         )
         object = {
-            "layout": data[f"{n}/{g}/layout"].reshape((num_samples, n, n))[idxs, :, :],
+            "layout": data[f"layout"].reshape((num_samples, n, n))[idxs, :, :],
             "eigval": eval,
             "eigvec": evec,
-            "gate_oh": data[f"{n}/{g}/gate_oh"].reshape((num_samples, -1))[idxs, :],
-            "gate_qubit_oh": data[f"{n}/{g}/gate_qubit_oh"].reshape((num_samples, -1))[
-                idxs, :
-            ],
-            "observation": data[f"{n}/{g}/observation"].reshape((num_samples, -1))[
-                idxs, :
-            ],
-            "gate": data[f"{n}/{g}/gate"][idxs],
-            "depth": data[f"{n}/{g}/depth"][idxs],
+            "gate_oh": data[f"gate_oh"].reshape((num_samples, -1))[idxs, :],
+            "gate_qubit_oh": data[f"gate_qubit_oh"].reshape((num_samples, -1))[idxs, :],
+            "observation": data[f"observation"].reshape((num_samples, -1))[idxs, :],
+            "gate": data[f"gate"][idxs],
+            "depth": data[f"depth"][idxs],
         }
         self.iter_idx += 1
         return object
