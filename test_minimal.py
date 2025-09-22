@@ -18,6 +18,7 @@ gen.manual_seed(seed)
 
 np.random.seed(seed % 2**32)
 
+
 def count_parameters(model):
     return sum(p.numel() for p in model.parameters())
 
@@ -45,7 +46,7 @@ class Trainer:
         print("Model details:")
         print(f"# parameters = {count_parameters(self.model)}")
         print(f"Optimizer: {self.optimizer.__class__.__name__}")
-        
+
         self.train_data = UnprepNpzDataloader(train_file, shuffle=True)
         self.validation_data = UnprepNpzDataloader(validation_file, shuffle=False)
         self.test_data = UnprepNpzDataloader(test_file, shuffle=False)
@@ -97,7 +98,11 @@ class Trainer:
         validation_gate_loss_history, validation_depth_loss_history = [], []
         training_loss_history, validation_loss_history = [], []
 
+        num_batches = self.train_data.get_total_size() / self.train_data.batch_size
+
         for epoch in range(epochs):
+            tic = time.time()
+            batch_tic = time.time()
             for i, train_data in enumerate(iter(self.train_data)):
                 n = train_data["eigval"].shape[1]
                 self.optimizer.zero_grad()
@@ -114,38 +119,72 @@ class Trainer:
                 loss = gate_loss + depth_loss
                 loss.backward()
                 self.optimizer.step()
+
                 training_loss_history.append(loss.detach().cpu().item())
                 train_gate_loss_history.append(gate_loss.detach().cpu().item())
                 train_depth_loss_history.append(depth_loss.detach().cpu().item())
 
-                if i % 500 == 0:
-                    validation_gate_loss, validation_depth_loss = self.calculate_validation_score()
+                if i % 1000 == 0:
+                    # Dump time data
+                    batch_toc = time.time()
+                    elapsed = batch_toc - tic
+                    avg_time = elapsed / (i + 1) if i > 0 else 0
+                    remaining_batches = num_batches - (i + 1)
+                    est_remaining = avg_time * remaining_batches
+                    if est_remaining < 60:
+                        est_str = f"{est_remaining:.2f} seconds"
+                    elif est_remaining < 3600:
+                        est_str = f"{est_remaining/60:.2f} minutes"
+                    else:
+                        est_str = f"{est_remaining/3600:.2f} hours"
+                    print(
+                        f"Iterated over {i} batches, {epoch} epochs ({batch_toc - batch_tic} s)| Avg time: {avg_time:.7f} s/batch | Estimated time left for epoch: {est_str}"
+                    )
+                    batch_tic = time.time()
+
+                if i % 5000 == 0 and i > 0:
+                    validation_gate_loss, validation_depth_loss = (
+                        self.calculate_validation_score()
+                    )
                     validation_gate_loss_history.append(validation_gate_loss)
                     validation_depth_loss_history.append(validation_depth_loss)
                     self.store_checkpoint(
-                        epoch, i, {
+                        epoch,
+                        i,
+                        {
                             "train_gate_loss": train_gate_loss_history[-1],
                             "train_depth_loss": train_depth_loss_history[-1],
                             "validation_gate_loss": validation_gate_loss_history[-1],
                             "validation_depth_loss": validation_depth_loss_history[-1],
-                        }
+                        },
                     )
-                    self.dump_loss_history(training_loss_history, train_gate_loss_history, train_depth_loss_history)
-                    print(f"Completed {i} iters, {epoch} epochs")
+                    self.dump_loss_history(
+                        training_loss_history,
+                        train_gate_loss_history,
+                        train_depth_loss_history,
+                    )
+
+                    batch_tic = time.time()
 
             # Also store at the end of the model
-            validation_gate_loss, validation_depth_loss = self.calculate_validation_score()
+            validation_gate_loss, validation_depth_loss = (
+                self.calculate_validation_score()
+            )
             validation_gate_loss_history.append(validation_gate_loss)
             validation_depth_loss_history.append(validation_depth_loss)
             self.store_checkpoint(
-                epoch, i, {
+                epoch,
+                i,
+                {
                     "train_gate_loss": train_gate_loss_history[-1],
                     "train_depth_loss": train_depth_loss_history[-1],
                     "validation_gate_loss": validation_gate_loss_history[-1],
                     "validation_depth_loss": validation_depth_loss_history[-1],
-                }
+                },
             )
-            self.dump_loss_history(training_loss_history, train_gate_loss_history, train_depth_loss_history)
+            self.dump_loss_history(
+                training_loss_history, train_gate_loss_history, train_depth_loss_history
+            )
 
     def evaluate_model(self, dataset) -> torch.Tensor:
         self.set_device()
@@ -242,9 +281,9 @@ if __name__ == "__main__":
     print(f"Args: {args}")
 
     if args.device == "hpc":
-        train_file = "/scratch1/sauravk/lsp-npz/new-sample-train-2-20.hdf5"
-        validation_file = "/scratch1/sauravk/lsp-npz/new-sample-validation-2-20.hdf5"
-        test_file = "/scratch1/sauravk/lsp-npz/new-sample-test-2-20.hdf5"
+        train_file = "/scratch1/sauravk/lsp-npz/new-sample-train-2-20.npz"
+        validation_file = "/scratch1/sauravk/lsp-npz/new-sample-validation-2-20.npz"
+        test_file = "/scratch1/sauravk/lsp-npz/new-sample-test-2-20.npz"
         model_output_folder = create_new_folder("/scratch1/sauravk/models", args)
     elif args.device == "mac":
         train_file = "training-data/compiled/hdf5/sample-train.hdf5"

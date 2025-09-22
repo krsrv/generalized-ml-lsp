@@ -174,7 +174,7 @@ if __name__ == "__main__":
         "--epochs", type=int, default=1, help="Number of epochs to train for"
     )
     parser.add_argument("--name", type=str, default="", help="Name suffix for folder")
-    parser.add_argument("--expid", type=str, default="", help="Name suffix for folder")
+    parser.add_argument("--expid", type=str, default="", help="Name prefix for folder")
     parser.add_argument(
         "--device", type=str, default="hpc", help="Name suffix for folder"
     )
@@ -188,7 +188,7 @@ if __name__ == "__main__":
         train_file = "training-data/compiled/hdf5/sample-train.hdf5"
         model_output_folder = create_new_folder("output", args)
     elif args.device == "qserver":
-        train_file = "training-data/compiled/new-sample-train.npz"
+        train_file = "training-data/compiled/new-sample-train-2-20.npz"
         model_output_folder = create_new_folder("output", args)
     print(f"Output folder: {model_output_folder}")
 
