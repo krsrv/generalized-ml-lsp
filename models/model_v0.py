@@ -122,12 +122,12 @@ class ModelV0(nn.Module):
             torch.ones_like(gates_oh) * n, gates_oh, gate_qubit_oh, qubit_tensors
         )
         # Token D
-        observation_signs = torch.narrow(observation, -1, 2 * n * n, n).long()
+        observation = observation.reshape((*observation.shape[:-1], n, -1))
+        observation_signs = torch.narrow(observation, -1, 2 * n, 1).squeeze(-1).long()
         sign_tensors = self.token_D_embedding(observation_signs)
         # Token E
-        observation_paulis = torch.narrow(observation, -1, 0, 2 * n * n).long()
+        observation_paulis = torch.narrow(observation, -1, 0, 2 * n).long()
         tableau_cell_tensors = self.token_E_embedding(qubit_tensors, observation_paulis)
-
         x = Tokens(
             global_tensor,
             qubit_tensors,

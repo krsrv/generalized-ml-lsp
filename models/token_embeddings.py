@@ -71,27 +71,9 @@ class Token_C_Embedding(nn.Module):
         super().__init__()
         self.gate_embedding_layer = GateEmbedding(token_dims.C_gt_1q_dim)
 
-    def get_one_hot_embedding_for_qubit(self, n: int, inp: Tensor):
-        output = F.one_hot(inp, num_classes=n + 1)
-        return output.narrow(-1, 1, output.shape[-1] - 1)
-
     def forward(
         self, n: Tensor, gates_oh: Tensor, gate_qubits_oh: Tensor, qubits: Tensor
     ):
-        gates_oh = F.one_hot(gates_oh, num_classes=NUM_GATE_TYPES)
-        gate_qubits_oh = gate_qubits_oh.reshape((*gate_qubits_oh.shape[:-1], -1, 2))
-        gate_qubits_oh = torch.concatenate(
-            (
-                self.get_one_hot_embedding_for_qubit(
-                    n[0, 0].item(), gate_qubits_oh[:, :, 0]
-                ),
-                # Potentially a bug? Check the data.
-                self.get_one_hot_embedding_for_qubit(
-                    n[0, 0].item(), gate_qubits_oh[:, :, 1]
-                ),
-            ),
-            dim=-1,
-        )
         return self.gate_embedding_layer(gates_oh, gate_qubits_oh, qubits)
 
 

@@ -101,23 +101,22 @@ class GateEmbedding(nn.Module):
     ) -> Tensor:
         """Generate embeddings of each pair (Gate, Qubit) where qubit index moves first."""
         device = qubits.device
-        # (-1) to ensure indexing starts from 0
-        gate_weights = self.layer(
-            F.one_hot(torch.arange(0, self.num_classes)).to(device).float()
+        gate_embeddings = self.layer(
+            F.one_hot(gates_oh, num_classes=NUM_GATE_TYPES).to(device).float()
         )
-        gate_embeddings = torch.matmul(gates_oh.float(), gate_weights)
 
-        gate_qubit_oh = gate_qubit_oh.reshape(
-            *gate_qubit_oh.shape[:-1], 2, gate_qubit_oh.shape[-1] // 2
+        n = qubits.shape[-2]
+        # Note that `gate_qubit_encodings` is 1-indexed, with 0 representing no qubit (for single
+        # qubit gates).
+        gate_qubit_oh = F.one_hot(gate_qubit_oh, num_classes=n + 1).to(device).float()
+        zeros = torch.zeros(
+            *qubits.shape[:-2], 1, qubits.shape[-1], device=device, dtype=qubits.dtype
         )
-        qubits = qubits.unsqueeze(-3)
-        qubits = qubits.expand(
-            *qubits.shape[:-3], gate_qubit_oh.shape[-3], *qubits.shape[-2:]
-        )
-        qubit_embeddings = torch.matmul(gate_qubit_oh.float(), qubits)
+        qubits = torch.cat([zeros, qubits], dim=-2)
+        qubit_embeddings = torch.matmul(gate_qubit_oh, qubits)  # shape (..., 2c, d)
         qubit_embeddings = qubit_embeddings.reshape(
-            *qubit_embeddings.shape[:-2], qubit_embeddings.shape[-1] * 2
-        )
+            *qubit_embeddings.shape[:-2], gate_embeddings.shape[-2], -1
+        )  # shape (..., c, 2d)
         return gate_embeddings + qubit_embeddings
 
 
@@ -147,10 +146,7 @@ class SignEmbedding(nn.Module):
         """
         device = signs.device
         signs_oh = F.one_hot(signs, num_classes=self.n_signs).to(device).float()
-        weights = self.layer(
-            F.one_hot(torch.arange(0, self.n_signs)).to(device).float()
-        )
-        sign_embeddings = torch.matmul(signs_oh, weights)
+        sign_embeddings = self.layer(signs_oh)
         return sign_embeddings + self.positional_encoding(sign_embeddings)
 
 
@@ -168,18 +164,21 @@ class TableauCellEmbedding(nn.Module):
 
     def forward(self, paulis: Tensor, qubits: Tensor) -> Tensor:
         nq = qubits.shape[-2]
-        # Map the Paulis as follow: 0 -> I, 1 -> X, 2 -> Y, 3 -> Z
-        # paulis = paulis[..., 0:nq * nq] + paulis[..., nq * nq:]
-        paulis = torch.narrow(paulis, -1, 0, nq * nq) + torch.narrow(
-            paulis, -1, nq * nq, nq * nq
-        )
+        # `paulis` is of shape (n, 2*n). The first n columns represent X stabilizers and
+        # the next n represent Z stabilizers. The columns are arranged in reverse qubit
+        # order.
+        # Map (I, X, Y, Z) to (0, 1, 3, 2)
+        paulis = torch.narrow(paulis, -1, 0, nq) + 2 * torch.narrow(paulis, -1, nq, nq)
+        paulis = paulis.flip(dims=[-1])
+        paulis = paulis.reshape((*paulis.shape[:-2], -1))
         device = qubits.device
         paulis_oh = F.one_hot(paulis, num_classes=self.n_paulis).to(device)
-        weights = self.layer(
-            F.one_hot(torch.arange(0, self.n_paulis)).to(device).float()
-        )
-        pauli_embeddings = torch.matmul(paulis_oh.float(), weights)
-        qubits = qubits.unsqueeze(-3)  # Shape: (1, nq, d)gun
+        pauli_embeddings = self.layer(paulis_oh.float())
+        nq = qubits.shape[-2]
+        # Expand qubits from (n, d) to (n*n, d)
+        # `expand` copies data from the subtensor following the expansion dimension. We want
+        # to repeat the entire qubit vector, so we expand at the 3rd last dimension.
+        qubits = qubits.unsqueeze(-3)  # Shape: (1, nq, d)
         qubits = qubits.expand(*qubits.shape[:-3], nq, nq, -1)  # Shape: (nq, nq, d)
         qubits = qubits.reshape(*qubits.shape[:-3], nq * nq, -1, 1)
         qubits = qubits.squeeze(-1)
@@ -202,7 +201,7 @@ class GateProjectionLayer(nn.Module):
         self.softmax = nn.Softmax(-1)
 
     def forward(self, x: Tensor) -> Tensor:
-        return torch.squeeze(self.gate_prediction_layer(x), -1)
+        return self.softmax(torch.squeeze(self.gate_prediction_layer(x), -1))
 
 
 class ResidualLayer(nn.Module):
