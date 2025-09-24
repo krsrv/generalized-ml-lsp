@@ -198,10 +198,10 @@ class GateProjectionLayer(nn.Module):
     def __init__(self, token_dim: TokenProperties) -> None:
         super().__init__()
         self.gate_prediction_layer = nn.Linear(token_dim.dC, 1)
-        self.softmax = nn.Softmax(-1)
+        # self.softmax = nn.Softmax(-1)
 
     def forward(self, x: Tensor) -> Tensor:
-        return self.softmax(torch.squeeze(self.gate_prediction_layer(x), -1))
+        return torch.squeeze(self.gate_prediction_layer(x), -1)
 
 
 class ResidualLayer(nn.Module):
