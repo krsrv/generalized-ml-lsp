@@ -85,23 +85,6 @@ def format_observation(obs: np.ndarray, n: int):
     return ",".join(output)
 
 
-def is_all_Z_state(observation: np.ndarray, n: int):
-    observation = observation.reshape(n, -1)
-    return (
-        np.all(observation[:, :n] == 0)  # No X
-        and np.all(observation[:, -1] == 0)  # No '-' sign
-        and np.count_nonzero(observation[:, n : 2 * n] == 1) == n  # Exactly n 1s
-    )
-
-
-def is_successfully_unprepared(beam_or_path: list[Path] | Path, n: int):
-    if type(beam_or_path) == list:
-        return np.any(
-            [is_all_Z_state(path.observations[-1], n) for path in beam_or_path]
-        )
-    return is_all_Z_state(beam_or_path.observations[-1], n)
-
-
 def print_gate_keys(layout: np.ndarray, gate_set: np.ndarray):
     _, _, rgd = get_gate_vectors(layout, gate_set)
     for k, v in rgd.items():
@@ -111,6 +94,34 @@ def print_gate_keys(layout: np.ndarray, gate_set: np.ndarray):
 def get_gate_literals(gate_array: np.ndarray, layout: np.ndarray, gate_set: np.ndarray):
     _, _, rgd = get_gate_vectors(layout, gate_set)
     return [rgd[gate] for gate in gate_array]
+
+
+class Path:
+    """
+    Class for each path in beam search.
+    """
+
+    def __init__(self, observations, depths, gates, cost):
+        self.observations = observations
+        self.depths = depths
+        self.gates = gates
+        self.cost = cost
+
+    @staticmethod
+    def _is_all_Z_state(observation: np.ndarray, n: int):
+        observation = observation.reshape(n, -1)
+        return (
+            np.all(observation[:, :n] == 0)  # No X
+            and np.all(observation[:, -1] == 0)  # No '-' sign
+            and np.count_nonzero(observation == 1) == n  # Exactly n 1s
+        )
+
+    @staticmethod
+    def is_successfully_unprepared(beam: list["Path"], n: int):
+        """
+        Return true if any of the input paths is an all 0 state.
+        """
+        return np.any([Path._is_all_Z_state(path.observations[-1], n) for path in beam])
 
 
 class Simulator:
@@ -167,18 +178,6 @@ class Simulator:
         return new_state
 
 
-class Path:
-    """
-    Class for each path in beam search.
-    """
-
-    def __init__(self, observations, depths, gates, cost):
-        self.observations = observations
-        self.depths = depths
-        self.gates = gates
-        self.cost = cost
-
-
 class InferWrapper:
     """
     Wrapper for running inference using ML models on LSP task. The inference has a max
@@ -195,12 +194,16 @@ class InferWrapper:
         self.model.load_state_dict(saved_data["model_state_dict"])
         self.model.eval()
 
-    def should_terminate(self, beam: list[Path], n: int, depth: int) -> bool:
+    def _should_terminate(self, beam: list[Path], n: int, depth: int) -> bool:
+        """
+        Check whether any of the paths in the beam have been successfully unprepared to the
+        all 0 state.
+        """
         if depth > self.max_depth:
             return True
-        return is_successfully_unprepared(beam, n)
+        return Path.is_successfully_unprepared(beam, n)
 
-    def run_inference_on_beam(self, beam, eval, evec, gates, gate_qubits):
+    def _run_inference_on_beam(self, beam, eval, evec, gates, gate_qubits):
         width = len(beam)
         gate_prediction_logit, depth_prediction = self.model.forward(
             torch.unsqueeze(torch.tensor(eval, dtype=torch.float32), dim=0).expand(
@@ -215,10 +218,13 @@ class InferWrapper:
         )
         return gate_prediction_logit, depth_prediction
 
-    def explore_and_truncate_beam(
+    def _explore_and_truncate_beam(
         self, beam, n, eval, evec, gates, gate_qubits, beam_width
     ):
-        gate_prediction_logit, depth_prediction = self.run_inference_on_beam(
+        """
+        Run model inference to get the depth estimates and truncate to `beam_width` elements
+        """
+        gate_prediction_logit, depth_prediction = self._run_inference_on_beam(
             beam, eval, evec, gates, gate_qubits
         )
         costs = (depth_prediction.detach().numpy() + 1) * n * n / 4
@@ -236,28 +242,36 @@ class InferWrapper:
         target: np.ndarray,
         beam_width: int = 1,
     ):
+        """
+        High level function to run inference on a given problem for unpreparing state.
+        Args:
+            layout: (np.ndarray) Boolean adjacency matrix of size (n, n)
+            gate_set: (np.ndarray) list of int representations of GateTypes. Look at the dictionary
+                `name_dict` for the mapping.
+            target: (np.ndarray) Boolean starting stabilizer of size (2*n+1), in the form
+                [X1 ... Xn Z1 ... Zn Sign]
+            beam_width: (int)
+        """
         eval, evec = _transform_graph(layout)
         n = layout.shape[0]
         gates, gate_qubits, rgd = get_gate_vectors(layout, gate_set)
         simulator = Simulator(layout, gate_set, rgd)
         depth = 0
-        gate_list, observation_list, depth_list = [], [target], []
         simulator.set_state(target)
         observation = torch.tensor(target)
 
         curr_beam = [Path([target], [], [], +torch.inf)]
         new_beam = []
 
-        while not self.should_terminate(curr_beam, n, depth):
-            # Truncate beam to beam_width
+        while not self._should_terminate(curr_beam, n, depth):
+            # Calculate predicted cost and truncate beam to beam_width
             curr_beam, gate_prediction_logit, depth_prediction = (
-                self.explore_and_truncate_beam(
+                self._explore_and_truncate_beam(
                     curr_beam, n, eval, evec, gates, gate_qubits, beam_width
                 )
             )
-            # print("Truncating")
 
-            # Generate new beam
+            # Expand beam with new elements.
             gate_predictions = nn.Softmax(-1)(gate_prediction_logit.detach())
             for i, gate_prediction in enumerate(gate_predictions):
                 top4 = gate_prediction.squeeze().numpy().argsort()[-4:][::-1]
@@ -272,23 +286,19 @@ class InferWrapper:
                             (depth_prediction.detach()[i] + 1) * n * n / 4,
                         )
                     )
-                    # print(
-                    #     f"New beam: {get_gate_literals(new_beam[-1].gates, layout, gate_set)}"
-                    # )
             curr_beam = new_beam
             new_beam = []
             depth += 1
-            # print(f"Depth {depth} ended")
 
-        curr_beam, _gp, _d = self.explore_and_truncate_beam(
+        curr_beam, _gp, _d = self._explore_and_truncate_beam(
             curr_beam, n, eval, evec, gates, gate_qubits, beam_width
         )
 
         for i, path in enumerate(curr_beam):
-            print(f"Path {i}: {is_successfully_unprepared(path, n)}")
+            print(f"Path {i}: {Path.is_successfully_unprepared([path], n)}")
             # print(
             #     f"Observations : {[format_observation(x, n) for x in path.observations]}"
             # )
             print(f"Gates : {get_gate_literals(path.gates, layout, gate_set)}")
             print(f"Depths : {[(x + 1) * n * n / 4 for x in path.depths]}")
-        return curr_beam, is_successfully_unprepared(curr_beam, n)
+        return curr_beam, Path.is_successfully_unprepared(curr_beam, n)
