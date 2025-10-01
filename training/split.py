@@ -37,8 +37,8 @@ class Splitter:
             self.data.append(data)
 
         self.batch_size = None
-        self.test_split = 0.10
-        self.validation_split = 0.10
+        self.test_split = 0.15
+        self.validation_split = 0.15
         self.generate_metadata()
         self.hash_set = set()
 
@@ -73,9 +73,9 @@ class Splitter:
         self.aggregate_num_batches = np.array(
             [int(v // self.batch_size) for k, v in self.aggregate_metadata.items()]
         )
-        self.aggregate_num_batches = self.aggregate_num_batches[
-            np.nonzero(self.aggregate_num_batches)
-        ]
+        # self.aggregate_num_batches = self.aggregate_num_batches[
+        #     np.nonzero(self.aggregate_num_batches)
+        # ]
         # Get total number of batches in dataset.
         self.total_batches = np.sum(self.aggregate_num_batches)
 
@@ -167,7 +167,12 @@ class Splitter:
         for idx, key in enumerate(self.aggregate_metadata.keys()):
             n, g = key
             if self.aggregate_metadata[key] < self.batch_size:
-                print(f"Skipping {n}/{g}: #examples < batch size")
+                print(
+                    f"Skipping {n}/{g}: #examples = {self.aggregate_metadata[key]} < batch size {self.batch_size}"
+                )
+                # If 0-value elements in self.aggregate_metadata are filtered out, we need to
+                # keep idx in track with the the filtered array indexing.
+                # idx = idx - 1
                 continue
             print(f"Running {n}/{g} ({idx})")
 
@@ -179,14 +184,14 @@ class Splitter:
             file_idxs, offset_idxs = self.retrieve_offsets_from_indices(
                 n, g, np.sort(shuffled_indices[:test_size])
             )
-            self.dump_to_file(
+            dump_size = self.dump_to_file(
                 n,
                 g,
                 file_idxs,
                 offset_idxs,
                 f"{folder}/tmp/{file_prefix}-{n}-{g}-test.npz",
             )
-            total_test_size += test_size
+            total_test_size += dump_size
 
             # Create validation data.
             validation_size = self._get_sample_size(
@@ -195,28 +200,30 @@ class Splitter:
             file_idxs, offset_idxs = self.retrieve_offsets_from_indices(
                 n, g, np.sort(shuffled_indices[test_size : test_size + validation_size])
             )
-            self.dump_to_file(
+            dump_size = self.dump_to_file(
                 n,
                 g,
                 file_idxs,
                 offset_idxs,
                 f"{folder}/tmp/{file_prefix}-{n}-{g}-validation.npz",
             )
-            total_validation_size += validation_size
+            total_validation_size += dump_size
 
             # Create train data.
-            train_size = self._get_sample_size(train_ng_idxs, train_ng_num_batches, idx)
+            _train_size = self._get_sample_size(
+                train_ng_idxs, train_ng_num_batches, idx
+            )
             file_idxs, offset_idxs = self.retrieve_offsets_from_indices(
                 n, g, np.sort(shuffled_indices[test_size + validation_size :])
             )
-            self.dump_to_file(
+            dump_size = self.dump_to_file(
                 n,
                 g,
                 file_idxs,
                 offset_idxs,
                 f"{folder}/tmp/{file_prefix}-{n}-{g}-train.npz",
             )
-            total_train_size += train_size
+            total_train_size += dump_size
 
         self.coalesce_files(folder, "tmp", file_prefix)
         self.delete_temp_files(folder)
@@ -267,6 +274,7 @@ class Splitter:
                     )
                 )
         np.savez_compressed(filename, **output)
+        return output["depth"].shape[0]
 
     @timeit
     def coalesce_files(self, folder: str, tmp_dir: str, file_prefix: str) -> None:
@@ -347,7 +355,7 @@ if __name__ == "__main__":
     )
     print(f"Total size: {splitter.total_size}")
     splitter.set_batch_size(64)
-    prefix = "new-sample"
+    prefix = ""
     test_size, validation_size, train_size = splitter.generate_split(
         "training-data/compiled", prefix
     )
