@@ -165,14 +165,11 @@ class TableauCellEmbedding(nn.Module):
     def forward(self, paulis: Tensor, qubits: Tensor) -> Tensor:
         nq = qubits.shape[-2]
         # `paulis` is of shape (n, 2*n). The first n columns represent X stabilizers and
-        # the next n represent Z stabilizers. The columns are arranged in reverse qubit
-        # order.
+        # the next n represent Z stabilizers.
         # Map (I, X, Y, Z) to (0, 1, 3, 2)
         paulis = torch.narrow(paulis, -1, 0, nq) + 2 * torch.narrow(paulis, -1, nq, nq)
-        paulis = paulis.flip(dims=[-1])
         paulis = paulis.reshape((*paulis.shape[:-2], -1))
-        device = qubits.device
-        paulis_oh = F.one_hot(paulis, num_classes=self.n_paulis).to(device)
+        paulis_oh = F.one_hot(paulis, num_classes=self.n_paulis).to(qubits.device)
         pauli_embeddings = self.layer(paulis_oh.float())
         nq = qubits.shape[-2]
         # Expand qubits from (n, d) to (n*n, d)
