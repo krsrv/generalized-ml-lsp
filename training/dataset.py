@@ -9,15 +9,26 @@ from functools import wraps
 import numpy as np
 
 
-def _transform_graph(adjacency_matrix):
+def transform_graph(adjacency_matrix):
     """
-    Transform an adjacency matrix to a laplacian matrix and return the eigenvalues, eigenvectors
+    Transform an adjacency matrix to a laplacian matrix and return the eigenvalues, eigenvectors.
+    Adjacency matrix should be of size (bs, n, n) where each (n, n) submatrix represents a
+    different layout.
     """
-    n = adjacency_matrix.shape[2]
-    laplacian = np.array(adjacency_matrix, dtype=np.int32)
-    diagonals = -np.sum(laplacian, axis=2)
-    laplacian = laplacian + diagonals[:, None, :] * np.eye(n)[None, :, :]
-    return np.linalg.eigh(laplacian)
+    dim = len(adjacency_matrix.shape)
+    assert dim == 2 or dim == 3
+    if dim == 3:
+        n = adjacency_matrix.shape[2]
+        laplacian = np.array(adjacency_matrix, dtype=np.int32)
+        diagonals = -np.sum(laplacian, axis=2)
+        laplacian = laplacian + diagonals[:, None, :] * np.eye(n)[None, :, :]
+        return np.linalg.eigh(laplacian)
+    else:
+        n = adjacency_matrix.shape[1]
+        laplacian = np.array(adjacency_matrix, dtype=np.int32)
+        diagonals = -np.diag(np.sum(laplacian, axis=1))
+        laplacian = laplacian + diagonals
+        return np.linalg.eigh(laplacian)
 
 
 def timeit(func):
@@ -169,7 +180,7 @@ class UnprepNpzDataloader:
         # Return the data
         data = self.cache[f"{n}/{g}"]
         num_samples = data[f"gate"].shape[0]
-        eval, evec = _transform_graph(
+        eval, evec = transform_graph(
             data[f"layout"].reshape((num_samples, n, n))[idxs, :, :]
         )
         object = {
