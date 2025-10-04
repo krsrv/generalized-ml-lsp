@@ -23,6 +23,19 @@ def count_parameters(model):
     return sum(p.numel() for p in model.parameters())
 
 
+def elapsed_str(elapsed, curr_batch_idx, total_batches, epoch_idx):
+    avg_time = elapsed / (curr_batch_idx + 1) if curr_batch_idx > 0 else 0
+    remaining_batches = total_batches - (curr_batch_idx + 1)
+    est_remaining = avg_time * remaining_batches
+    if est_remaining < 60:
+        est_str = f"{est_remaining:.2f} seconds"
+    elif est_remaining < 3600:
+        est_str = f"{est_remaining/60:.2f} minutes"
+    else:
+        est_str = f"{est_remaining/3600:.2f} hours"
+    return f"Iterated over {curr_batch_idx} batchs, {epoch_idx} epochs ({elapsed} s)| Avg time: {avg_time:.7f} s/batch | Estimated time left for epoch: {est_str}"
+
+
 class Trainer:
     def __init__(
         self,
@@ -67,7 +80,7 @@ class Trainer:
         self, n, gate_prediction, depth_prediction, true_gates, true_depth
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return self.gate_loss(gate_prediction, true_gates), self.alpha * (
-            self.depth_loss(depth_prediction, true_depth.float() * 4 / (n**2) - 1)
+            self.depth_loss(depth_prediction, true_depth.float() / 2 - 2.2)
         )
 
     def run_model(self, data, use_grad=True, use_eval=False):
@@ -125,20 +138,11 @@ class Trainer:
                 train_depth_loss_history.append(depth_loss.detach().cpu().item())
 
                 if i % 1000 == 0:
-                    # Dump time data
-                    batch_toc = time.time()
-                    elapsed = batch_toc - tic
-                    avg_time = elapsed / (i + 1) if i > 0 else 0
-                    remaining_batches = num_batches - (i + 1)
-                    est_remaining = avg_time * remaining_batches
-                    if est_remaining < 60:
-                        est_str = f"{est_remaining:.2f} seconds"
-                    elif est_remaining < 3600:
-                        est_str = f"{est_remaining/60:.2f} minutes"
-                    else:
-                        est_str = f"{est_remaining/3600:.2f} hours"
-                    print(
-                        f"Iterated over {i} batches, {epoch} epochs ({batch_toc - batch_tic} s)| Avg time: {avg_time:.7f} s/batch | Estimated time left for epoch: {est_str}"
+                    print(elapsed_str(time.time() - batch_tic, i, num_batches, epoch))
+                    self.dump_loss_history(
+                        training_loss_history,
+                        train_gate_loss_history,
+                        train_depth_loss_history,
                     )
                     batch_tic = time.time()
 
@@ -157,11 +161,6 @@ class Trainer:
                             "validation_gate_loss": validation_gate_loss_history[-1],
                             "validation_depth_loss": validation_depth_loss_history[-1],
                         },
-                    )
-                    self.dump_loss_history(
-                        training_loss_history,
-                        train_gate_loss_history,
-                        train_depth_loss_history,
                     )
 
                     batch_tic = time.time()
@@ -259,6 +258,30 @@ def update_metadata_with_args(args: Namespace, metadata: dict):
         metadata["args"][key] = value
 
 
+def update_metadata_with_system(metadata: dict):
+    metadata["cpu_count"] = [os.cpu_count()]
+    if torch.cuda.is_available():
+        metadata["gpu_count"] = torch.cuda.device_count()
+        metadata["gpu"] = []
+        for i in range(metadata["gpu_count"]):
+            gpu_name = torch.cuda.get_device_name(i)
+            gpu_properties = torch.cuda.get_device_properties(i)
+            metadata["gpu"].append(
+                {
+                    "name": gpu_name,
+                    "memory": gpu_properties.total_memory / (1024**3),
+                    "multi_processor_count": gpu_properties.multi_processor_count,
+                }
+            )
+
+
+def dump_metadata(folder: str, metadata: dict):
+    import json
+
+    with open(f"{folder}/metadata.json", "w") as f:
+        json.dump(metadata, f)
+
+
 if __name__ == "__main__":
     # INSERT_YOUR_CODE
     import argparse
@@ -281,28 +304,30 @@ if __name__ == "__main__":
     print(f"Args: {args}")
 
     if args.device == "hpc":
-        train_file = "/scratch1/sauravk/lsp-npz/new-sample-train-2-20.npz"
-        validation_file = "/scratch1/sauravk/lsp-npz/new-sample-validation-2-20.npz"
-        test_file = "/scratch1/sauravk/lsp-npz/new-sample-test-2-20.npz"
+        args.train_file = "/scratch1/sauravk/lsp-npz/new-sample-train-2-20.npz"
+        args.validation_file = (
+            "/scratch1/sauravk/lsp-npz/new-sample-validation-2-20.npz"
+        )
+        args.test_file = "/scratch1/sauravk/lsp-npz/new-sample-test-2-20.npz"
         model_output_folder = create_new_folder("/scratch1/sauravk/models", args)
     elif args.device == "mac":
-        train_file = "training-data/compiled/hdf5/sample-train.hdf5"
-        validation_file = "training-data/compiled/hdf5/sample-validation.hdf5"
-        test_file = "training-data/compiled/hdf5/sample-test.hdf5"
+        args.train_file = "training-data/compiled/hdf5/sample-train.hdf5"
+        args.validation_file = "training-data/compiled/hdf5/sample-validation.hdf5"
+        args.test_file = "training-data/compiled/hdf5/sample-test.hdf5"
         model_output_folder = create_new_folder("output", args)
     elif args.device == "qserver":
-        train_file = "training-data/compiled/new-sample-train-2-20.npz"
-        validation_file = "training-data/compiled/new-sample-validation-2-20.npz"
-        test_file = "training-data/compiled/new-sample-test-2-20.npz"
+        args.train_file = "training-data/split/2-10-train.npz"
+        args.validation_file = "training-data/split/2-10-validation.npz"
+        args.test_file = "training-data/split/2-10-test.npz"
         model_output_folder = create_new_folder("output", args)
     print(f"Output folder: {model_output_folder}")
 
     seed = 1
     np.random.seed(seed)
     trainer = Trainer(
-        train_file,
-        validation_file,
-        test_file,
+        args.train_file,
+        args.validation_file,
+        args.test_file,
         model_output_folder,
         lr=args.lr,
         betas=(args.beta1, args.beta2),
@@ -310,47 +335,33 @@ if __name__ == "__main__":
 
     metadata = {}
     update_metadata_with_args(args, metadata)
+    update_metadata_with_system(metadata)
+    metadata["validation_size"] = int(trainer.validation_data.get_total_size())
+    metadata["train_size"] = int(trainer.train_data.get_total_size())
+    metadata["train_batches"] = int(
+        trainer.train_data.get_total_size() // trainer.train_data.batch_size
+    )
+    metadata["test_size"] = int(trainer.test_data.get_total_size())
+    dump_metadata(model_output_folder, metadata)
 
     tic = time.time()
     loss = trainer.calculate_validation_score()
     toc = time.time()
     print(f"Initial validation loss = {loss} ({toc-tic} s)")
     metadata["validation_time"] = toc - tic
-    metadata["validation_size"] = int(trainer.validation_data.get_total_size())
 
     tic = time.time()
     trainer.train(epochs=args.epochs)
     toc = time.time()
     print(f"Training complete ({toc-tic} s)")
     metadata["train_time"] = toc - tic
-    metadata["train_size"] = int(trainer.train_data.get_total_size())
 
-    tic = time.time()
-    gate_loss, depth_loss = trainer.calculate_test_score()
-    loss = gate_loss + depth_loss
-    toc = time.time()
-    print(f"Test loss = {loss} ({toc-tic} s)")
-    metadata["test_time"] = toc - tic
-    metadata["test_size"] = int(trainer.test_data.get_total_size())
-    metadata["test_loss"] = loss
+    # tic = time.time()
+    # gate_loss, depth_loss = trainer.calculate_test_score()
+    # loss = gate_loss + depth_loss
+    # toc = time.time()
+    # print(f"Test loss = {loss} ({toc-tic} s)")
+    # metadata["test_time"] = toc - tic
+    # metadata["test_loss"] = loss
 
-    import json
-    import os
-
-    metadata["cpu_count"] = [os.cpu_count()]
-    if torch.cuda.is_available():
-        metadata["gpu_count"] = torch.cuda.device_count()
-        metadata["gpu"] = []
-        for i in range(metadata["gpu_count"]):
-            gpu_name = torch.cuda.get_device_name(i)
-            gpu_properties = torch.cuda.get_device_properties(i)
-            metadata["gpu"].append(
-                {
-                    "name": gpu_name,
-                    "memory": gpu_properties.total_memory / (1024**3),
-                    "multi_processor_count": gpu_properties.multi_processor_count,
-                }
-            )
-
-    with open(f"{model_output_folder}/metadata.json", "w") as f:
-        json.dump(metadata, f)
+    dump_metadata(model_output_folder, metadata)

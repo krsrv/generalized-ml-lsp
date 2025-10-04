@@ -19,6 +19,19 @@ gen.manual_seed(seed)
 np.random.seed(seed % 2**32)
 
 
+def elapsed_str(elapsed, curr_batch_idx, total_batches):
+    avg_time = elapsed / (curr_batch_idx + 1) if curr_batch_idx > 0 else 0
+    remaining_batches = total_batches - (curr_batch_idx + 1)
+    est_remaining = avg_time * remaining_batches
+    if est_remaining < 60:
+        est_str = f"{est_remaining:.2f} seconds"
+    elif est_remaining < 3600:
+        est_str = f"{est_remaining/60:.2f} minutes"
+    else:
+        est_str = f"{est_remaining/3600:.2f} hours"
+    return f"Iterated over {curr_batch_idx} epochs ({elapsed} s)| Avg time: {avg_time:.7f} s/batch | Estimated time left for epoch: {est_str}"
+
+
 class Trainer:
     def __init__(
         self,
@@ -87,7 +100,7 @@ class Trainer:
         training_loss_history = []
 
         train_data = next(iter(self.train_data))
-
+        tic = time.time()
         for epoch in range(epochs):
             self.optimizer.zero_grad()
             gate_prediction, depth_prediction = self.run_model(train_data)
@@ -109,12 +122,15 @@ class Trainer:
                 self.dump_loss_history(
                     training_loss_history, gate_loss_history, depth_loss_history
                 )
-                print(f"Completed {epoch} epochs")
+                print(elapsed_str(time.time() - tic, epoch, epochs))
+                tic = time.time()
+                self.store_checkpoint(epoch, 0, None, None)
 
         # Also store at the end of the model
         self.dump_loss_history(
             training_loss_history, gate_loss_history, depth_loss_history
         )
+        self.store_checkpoint(epoch, 0, None, None)
 
     def dump_loss_history(
         self, loss_history, gate_loss_history=None, depth_loss_history=None
@@ -160,6 +176,30 @@ def update_metadata_with_args(args: Namespace, metadata: dict):
         metadata["args"][key] = value
 
 
+def update_metadata_with_system(metadata: dict):
+    metadata["cpu_count"] = [os.cpu_count()]
+    if torch.cuda.is_available():
+        metadata["gpu_count"] = torch.cuda.device_count()
+        metadata["gpu"] = []
+        for i in range(metadata["gpu_count"]):
+            gpu_name = torch.cuda.get_device_name(i)
+            gpu_properties = torch.cuda.get_device_properties(i)
+            metadata["gpu"].append(
+                {
+                    "name": gpu_name,
+                    "memory": gpu_properties.total_memory / (1024**3),
+                    "multi_processor_count": gpu_properties.multi_processor_count,
+                }
+            )
+
+
+def dump_metadata(folder: str, metadata: dict):
+    import json
+
+    with open(f"{folder}/metadata.json", "w") as f:
+        json.dump(metadata, f)
+
+
 if __name__ == "__main__":
     # INSERT_YOUR_CODE
     import argparse
@@ -182,20 +222,20 @@ if __name__ == "__main__":
     print(f"Args: {args}")
 
     if args.device == "hpc":
-        train_file = "/scratch1/sauravk/lsp-hdf5/sample-train.hdf5"
+        args.train_file = "/scratch1/sauravk/lsp-hdf5/sample-train.hdf5"
         model_output_folder = create_new_folder("/scratch1/sauravk/models", args)
     elif args.device == "mac":
-        train_file = "training-data/compiled/hdf5/sample-train.hdf5"
+        args.train_file = "training-data/compiled/hdf5/sample-train.hdf5"
         model_output_folder = create_new_folder("output", args)
     elif args.device == "qserver":
-        train_file = "training-data/compiled/new-sample-train-2-20.npz"
+        args.train_file = "training-data/split/2-10-train.npz"
         model_output_folder = create_new_folder("output", args)
     print(f"Output folder: {model_output_folder}")
 
     seed = 1
     np.random.seed(1)
     trainer = Trainer(
-        train_file,
+        args.train_file,
         model_output_folder,
         lr=args.lr,
         betas=(args.beta1, args.beta2),
@@ -203,31 +243,17 @@ if __name__ == "__main__":
 
     metadata = {}
     update_metadata_with_args(args, metadata)
+    update_metadata_with_system(metadata)
+    metadata["train_size"] = int(trainer.train_data.get_total_size())
+    metadata["train_batches"] = int(
+        trainer.train_data.get_total_size() // trainer.train_data.batch_size
+    )
+    dump_metadata(model_output_folder, metadata)
 
     tic = time.time()
     trainer.train(epochs=args.epochs)
     toc = time.time()
     print(f"Training complete ({toc-tic} s)")
     metadata["train_time"] = toc - tic
-    metadata["train_size"] = int(trainer.train_data.get_total_size())
 
-    import json
-    import os
-
-    metadata["cpu_count"] = [os.cpu_count()]
-    if torch.cuda.is_available():
-        metadata["gpu_count"] = torch.cuda.device_count()
-        metadata["gpu"] = []
-        for i in range(metadata["gpu_count"]):
-            gpu_name = torch.cuda.get_device_name(i)
-            gpu_properties = torch.cuda.get_device_properties(i)
-            metadata["gpu"].append(
-                {
-                    "name": gpu_name,
-                    "memory": gpu_properties.total_memory / (1024**3),
-                    "multi_processor_count": gpu_properties.multi_processor_count,
-                }
-            )
-
-    with open(f"{model_output_folder}/metadata.json", "w") as f:
-        json.dump(metadata, f)
+    dump_metadata(model_output_folder, metadata)
