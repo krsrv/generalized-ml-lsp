@@ -1,3 +1,4 @@
+import ctypes
 import subprocess
 
 import numpy as np
@@ -49,7 +50,8 @@ def get_gate_vectors(layout: np.ndarray, gate_set: list) -> (list, list, dict):
                         continue
                     if layout[i, j]:
                         gates += [gate]
-                        gate_qubits += [i + 1, j + 1]
+                        # gate_qubits += [i + 1, j + 1] # Correct
+                        gate_qubits += [j + 1, i + 1]  # Incorrect
                         reverse_gate_dict[idx] = f"{name_dict[gate]}-{i}-{j}"
                         idx += 1
             if not is_symmetric_gate(gate):
@@ -59,7 +61,8 @@ def get_gate_vectors(layout: np.ndarray, gate_set: list) -> (list, list, dict):
                             continue
                         if layout[i, j]:
                             gates += [gate]
-                            gate_qubits += [j + 1, i + 1]
+                            gate_qubits += [i + 1, j + 1]  # incorrect
+                            # gate_qubits += [j + 1, i + 1] # correct
                             reverse_gate_dict[idx] = f"{name_dict[gate]}-{j}-{i}"
                             idx += 1
     return gates, gate_qubits, reverse_gate_dict
@@ -92,6 +95,95 @@ def is_successfully_unprepared(beam: list["Path"]):
     return np.any([path.is_successfully_unprepared() for path in beam])
 
 
+class BatchSimulator:
+    # Define a ctypes Structure matching the C struct
+    class Stabilizers(ctypes.Structure):
+        _fields_ = [
+            ("stabilizers", ctypes.POINTER(ctypes.c_int)),
+            ("is_unprepped", ctypes.POINTER(ctypes.c_bool)),
+            ("n", ctypes.c_int),
+            ("k", ctypes.c_int),
+        ]
+
+    def __init__(self, layouts: np.ndarray, gate_set: np.ndarray):
+        assert (
+            len(layouts.shape) == 3 and layouts.dtype == np.bool_
+        ), f"layouts must be a 3D np.ndarray of dtype np.bool_, got shape={layouts.shape}, dtype={layouts.dtype}"
+        assert (
+            len(gate_set.shape) == 2 and gate_set.dtype == np.int8
+        ), f"gate_set must be a 2D np.ndarray of dtype np.int8, got shape={gate_set.shape}, dtype={gate_set.dtype}"
+        self.layouts = layouts
+        self.gate_set = gate_set.astype(np.int32)
+        self._setup_simulator_ctype()
+
+    def _setup_simulator_ctype(self):
+        # Load shared library
+        self.lib = ctypes.CDLL(
+            "../lsp_nonn/src/libsim.so",
+        )
+        self.lib.run_simulator.argtypes = [
+            ctypes.c_int,  # n
+            ctypes.POINTER(ctypes.c_bool),  # layout
+            ctypes.c_int,  # num_gate_types
+            ctypes.POINTER(ctypes.c_int),  # gate_set
+            ctypes.POINTER(ctypes.c_bool),  # tableau_arr
+            ctypes.c_int,  # num_applied_gates
+            ctypes.POINTER(ctypes.c_int),  # gates
+        ]
+        self.lib.run_simulator.restype = BatchSimulator.Stabilizers
+
+        self.lib.free_stabilizers_struct.argtypes = [BatchSimulator.Stabilizers]
+        self.lib.free_stabilizers_struct.restype = None
+
+    def remove_batch(self, is_batch_unprepped: np.ndarray):
+        self.layouts = self.layouts[~is_batch_unprepped]
+        self.gate_set = self.gate_set[~is_batch_unprepped]
+
+    def run_simulation(
+        self,
+        states: np.ndarray,  # (bs, bw, 2*n*n+n)
+        gates: np.ndarray,  # (bs, bw, k)
+    ):
+        assert (
+            len(states.shape) == 3 and states.dtype == np.bool_
+        ), f"states must be a 3D np.ndarray of dtype np.bool_, got shape={states.shape}, dtype={states.dtype}"
+        assert (
+            len(gates.shape) == 3 and gates.dtype == np.int_
+        ), f"gates must be a 3D np.ndarray of dtype np.int_, got shape={gates.shape}, dtype={gates.dtype}"
+
+        n = self.layouts.shape[-1]
+        k = gates.shape[-1]
+        gates = gates.astype(np.int32)
+        new_state = np.zeros(states.shape[:2] + (k,) + states.shape[2:], dtype=states.dtype)
+        is_unprepped = np.zeros(states.shape[:2] + (k,), dtype=np.bool_)
+        for i in range(states.shape[0]):
+            for j in range(states.shape[1]):
+                layout = self.layouts[i].reshape(-1).ctypes.data_as(ctypes.POINTER(ctypes.c_bool))
+                gate_set = np.ascontiguousarray(self.gate_set[i]).ctypes.data_as(
+                    ctypes.POINTER(ctypes.c_int)
+                )
+                state = states[i, j].reshape(-1).ctypes.data_as(ctypes.POINTER(ctypes.c_bool))
+                sim_result = self.lib.run_simulator(
+                    n,
+                    layout,
+                    len(self.gate_set[i, :]),
+                    gate_set,
+                    state,
+                    k,
+                    gates[i, j].ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
+                )
+                # Access the array
+                if not sim_result.stabilizers:
+                    raise MemoryError("C function failed to allocate memory")
+                new_state[i, j] = np.ctypeslib.as_array(
+                    sim_result.stabilizers, shape=(k * (n * n * 2 + n),)
+                ).reshape(k, -1)
+                is_unprepped[i, j] = np.ctypeslib.as_array(sim_result.is_unprepped, shape=(k,))
+                self.lib.free_stabilizers_struct(sim_result)
+
+        return new_state, is_unprepped
+
+
 class Simulator:
     """
     Simulate stabilizer circuits
@@ -108,13 +200,14 @@ class Simulator:
         self.state = state
 
     def construct_input_format(self):
-        self.layout_input = [self.n * (self.n - 1) // 2]
+        self.layout_input = []
         for i in range(self.n):
             for j in range(self.n):
                 if j <= i:
                     continue
-                if self.layout[i, j]:
+                if self.layout[i, j] or self.layout[i, j] == 1:
                     self.layout_input += [i, j]
+        self.layout_input = [len(self.layout_input) // 2] + self.layout_input
 
         self.gate_set_input = [self.gate_set.shape[0]]
         for i in self.gate_set:
@@ -140,7 +233,7 @@ class Simulator:
         if result.returncode != 0:
             # Print stderr for debugging
             print("Simulator stderr:", result.stderr)
-            print(f"Arguments: {args}")
+            print(f"Arguments: {' '.join(args)}")
             raise RuntimeError(f"Simulator failed: {result.stderr}")
         new_state = np.array([int(c) for c in result.stdout.strip()])
         self.set_state(new_state)
@@ -151,16 +244,34 @@ class Path:
     """
     Class for each path in beam search.
     Or class for an entire beam.
+
+    `unprepped` only makes sense if self.bs = 1
+    Each class variable `observations`, `depths`, `gates` has dimension (width, bs, *)
+    where width is the current width (defined by the observations tensor), and bs is the
+    current batch size. For instance:
+    * width increases after each `update_state` call
+    * bs might decrease after an `update_state` call. Remember to update any other object
+      which takes into account the batch size
+    * width decreases after `filter_beam` call.
     """
 
     def __init__(
-        self, n: int, observations: list, depths: list, gates: list, cost: int
+        self,
+        n: int,
+        observations: list,
+        depths: list,
+        gates: list,
+        width: int = 1,
+        bs: int = 64,
+        unprepped: bool = False,
     ):
         self.n = n
         self.observations = observations
         self.depths = depths
         self.gates = gates
-        self.cost = cost
+        self.width = width
+        self.bs = bs
+        self.unprepped = unprepped
 
     def __str__(self, layout=None, gate_set=None):
         st = f"Success: {self.is_successfully_unprepared()}"
@@ -173,10 +284,32 @@ class Path:
         st += "\n"
         return st
 
+    def print_debug_stmt(self):
+        print("Beam debug:")
+        print(f"    observations shape: {self.observations.shape}")
+        if self.depths is not None:
+            print(f"    depths shape: {self.depths.shape}")
+        if self.gates is not None:
+            print(f"    gates shape: {self.gates.shape}")
+
     def is_successfully_unprepared(self):
         """
         Return true if any of the input paths is an all 0 state.
         """
+        observations = self.observations.reshape(self.width, self.bs, -1)
+        observations = observations.transpose(0, 1)
+
+        def is_ground_state(subtensor):
+            # Example: check if all elements in the (bs, n) subtensor are zero
+            return (
+                np.all(subtensor[:, :n] == 0)  # No X
+                and np.all(subtensor[:, -1] == 0)  # No '-' sign
+                and np.count_nonzero(subtensor == 1) == n  # Exactly n 1s
+            )
+            return torch.all(subtensor == 0)
+
+        # There is no torch.apply or torch.map for tensors, so we use a list comprehension
+        # return torch.stack([check_valid(obs) for obs in observations])
         return Path._is_all_Z_state(self.observations[-1], self.n)
 
     def filter_beam(self, top_indices: torch.Tensor):
@@ -185,9 +318,8 @@ class Path:
         are tracked by the tensor `top_indices`
         """
         k, bs = top_indices.shape
-        width = self.observations.shape[0] // bs
         # Modify observations
-        self.observations = self.observations.reshape(width, bs, -1)
+        self.observations = self.observations.reshape(self.width, bs, -1)
         cols = (
             torch.arange(bs, device=self.observations.device)
             .unsqueeze(0)
@@ -196,67 +328,144 @@ class Path:
         self.observations = self.observations[top_indices, cols]
         self.observations = self.observations.reshape(k * bs, -1)
         # Modify depths
-        cols.to(self.depths.device)
-        self.depths = self.depths.reshape(width, bs, -1)
-        self.depths = self.depths[top_indices, cols]
-        self.depths = self.depths.reshape(k * bs, -1)
+        if self.depths is not None:
+            cols.to(self.depths.device)
+            self.depths = self.depths.reshape(self.width, bs, -1)
+            self.depths = self.depths[top_indices, cols]
+            self.depths = self.depths.reshape(k * bs, -1)
         # Modify gates
-        self.gates = self.gates.reshape(width, bs, -1)
-        self.gates = self.gates[top_indices, cols]
-        self.gates = self.gates.reshape(k * bs, -1)
+        if self.gates is not None:
+            cols.to(self.gates.device)
+            self.gates = self.gates.reshape(self.width, bs, -1)
+            self.gates = self.gates[top_indices, cols]
+            self.gates = self.gates.reshape(k * bs, -1)
 
-    def append_tensors(self, new_gates: torch.Tensor, depths: torch.Tensor):
+        self.width = k
+
+    def append_depth_tensor(self, depths: torch.Tensor):
+        """
+        depths: (width, bs)
+        self.depths: (width * bs, depth)
+        """
+        if self.depths is None:
+            self.depths = depths.reshape(-1).unsqueeze(-1)
+        else:
+            self.depths = self.depths.reshape(self.width, self.bs, -1)
+            self.depths = torch.concat((self.depths, depths.unsqueeze(-1)), dim=-1)
+            self.depths = self.depths.reshape(self.width * self.bs, -1)
+
+    def append_to(self, path_list: list["Path"]):
+        self.observations = self.observations.reshape(self.width, self.bs, -1).transpose(0, 1)
+        self.depths = self.depths.reshape(self.width, self.bs, -1).transpose(0, 1)
+        self.gates = self.gates.reshape(self.width, self.bs, -1).transpose(0, 1)
+
+        for idx in range(self.observations.shape[0]):
+            path_list.append(
+                Path(
+                    self.n,
+                    self.observations[idx].cpu(),
+                    self.depths[idx].cpu(),
+                    self.gates[idx].cpu(),
+                    self.width,
+                    1,
+                    False,
+                )
+            )
+        self.observations = None
+        self.depths = None
+        self.gates = None
+
+    def update_states(
+        self, new_gates: torch.Tensor, unprepped_states: list["Path"], simulator: BatchSimulator
+    ) -> (int, int, np.ndarray[bool]):
         """
         Update beam to add new gate and depth tensors.
         The `new_gates` tensor corresponds to the next gate to be applied in the circuit. For
         each path in the beam, and for each element in the batch, there are `k` new gates to
-        be added.
+        be added. Size: (beam width, batch size, # gates to explore)
         The `depths` tensor corresponds to the current depth prediction, and should be added
-        to each of the new copy generated.
+        to each of the new copy generated. Size: (beam width, batch size).
+        After the update, new sizes are:
+        gates: (k, bw, bs, depth) -> (k * bw * bs, depth)
+        depths: (k, bw, bs, depth) -> (k * bw * bs, depth)
+
+        Args:
+            new_gates : torch.Tensor(bw, bs, k)
+            unprepped_states : list[Path]. List of currently unprepared states
+            simulator : Batch Simulator with layout and gate set info already populated.
+                simulator.layout[i] and simulator.gate_set[i] corresponding to ith batch in
+                batch size
+
+        Modifies:
+            unprepped_states : Adds all the batches which have at least one path where state
+                has been successfully unprepared
+
+        Returns:
+            new batch size, new width, unprepped batches (bool np.ndarray)
         """
+        ###############
         # Add new gates
+        ###############
         bw, bs, k = new_gates.shape
+        assert self.bs == bs, f"Batch size mismatch: self.bs={self.bs}, bs={bs}"
         new_gates = new_gates.transpose(1, 2).transpose(0, 1).unsqueeze(-1)
-        self.gates = self.gates.reshape(bw, bs, -1).unsqueeze(0).expand(k, -1, -1, -1)
-        self.gates = torch.concat((self.gates, new_gates), dim=-1)
-        self.gates = self.gates.reshape(k * bw * bs, -1)
-        # Attach depth predictions
+        if self.gates is None:
+            self.gates = new_gates
+        else:
+            self.gates = self.gates.reshape(bw, bs, -1).unsqueeze(0).expand(k, -1, -1, -1)
+            self.gates = torch.concat((self.gates, new_gates), dim=-1)
+        # self.gates -> (k, bw, bs, depth)
+
+        ###############
+        # Update depths
+        ###############
         self.depths = self.depths.reshape(bw, bs, -1)
-        depths = depths.unsqueeze(-1)
-        self.depths = torch.concat((self.depths, depths), dim=-1)
-        self.depths = (
-            self.depths.unsqueeze(0).expand(k, -1, -1, -1).reshape(k * bw * bs, -1)
-        )
+        self.depths = self.depths.unsqueeze(0).expand(k, -1, -1, -1)
+        # self.depths -> (k, bw, bs, depth)
 
-    def update_observations(self, simulators: list[Simulator], bs: int, k: int):
+        ###############
+        # Update observations
+        ###############
+        self.observations = self.observations.reshape(bw, bs, -1).permute(1, 0, 2)
+        gates = self.gates.reshape(k, bw, bs, -1).permute(2, 1, 0, 3)
+        self.observations, is_unprepped = simulator.run_simulation(
+            self.observations.cpu().numpy(),
+            gates[:, :, :, -1].cpu().numpy(),
+        )
+        # self.observations -> (bs, bw, k, 2n^2+n) (np.ndarray)
+        # is_unprepped -> (bs, bw, k)
+
+        ###############
+        # Remove unprepped states
+        ###############
+        is_batch_unprepped = np.any(is_unprepped, axis=(-1, -2))
+        self.gates = self.gates.transpose(0, 2)
+        self.depths = self.depths.transpose(0, 2)
+        # Add unprepped states to `unprepped_states`
+        for idx in np.nonzero(is_batch_unprepped)[0]:
+            unprepped_states.append(
+                Path(
+                    self.n,
+                    self.observations[idx].transpose(1, 0, 2).reshape(bw * k, -1),  # np.ndarray
+                    self.depths[idx].transpose(0, 1).reshape(bw * k, -1).cpu(),  # torch.tensor
+                    self.gates[idx].transpose(0, 1).reshape(bw * k, -1).cpu(),  # torch.tensor
+                    bw * k,
+                    1,
+                    True,
+                )
+            )
+        # Filter out unprepped states from current state variables
+        self.bs = bs = self.bs - np.count_nonzero(is_batch_unprepped)
+        self.gates = self.gates[~is_batch_unprepped].transpose(0, 2).reshape(k * bw * bs, -1)
+        self.depths = self.depths[~is_batch_unprepped].transpose(0, 2).reshape(k * bw * bs, -1)
         self.observations = (
-            self.observations.reshape(-1, bs, 2 * self.n * self.n + self.n)
-            .unsqueeze(0)
-            .expand(k, -1, -1, -1)
+            torch.tensor(self.observations[~is_batch_unprepped], device=self.gates.device)
+            .permute(2, 1, 0, 3)
+            .reshape(k * bw * bs, -1)
         )
-        bw = self.observations.shape[1]
-        self.gates = self.gates.reshape(k, bw, bs, -1)
 
-        # Permute so that observations and gates are 2D, with the bs index referring to each row
-        # Start a new job for each of the bs elements, and sequentially process all the elements
-        # inside the job.
-        # For 10 batches:
-        # With simulation + no parallelization = 520s
-        # With no simulation = 56s
-        # With simulation for 1 bs = 68s
-        # Expected runtime for parallelized simulation would be 80-90s.
-        for j in range(1):
-            for t in range(k):
-                for i in range(bw):
-                    observation = self.observations[t, i, j, :]
-                    simulators[j].set_state(observation.cpu().numpy())
-                    simulators[j].step(self.gates[t, i, j, -1].cpu().numpy())
-                    self.observations[t, i, j, :] = torch.tensor(
-                        simulators[j].step(self.gates[t, i, j, -1].cpu().numpy()),
-                        device=self.observations.device,
-                    )
-        self.observations = self.observations.reshape(k * bw * bs, -1)
-        self.gates = self.gates.reshape(k * bw * bs, -1)
+        self.width = k * bw
+        return self.bs, self.width, is_batch_unprepped
 
     @staticmethod
     def _is_all_Z_state(observation: np.ndarray, n: int):
@@ -285,7 +494,7 @@ class DataHolder:
             and gate_qubits is not None
         ), "Either (layout, gate_set) or (evals, evecs, gates, gate_qubits) must be provided"
         if layout is not None and gate_set is not None:
-            self.gate_set = gate_set
+            # self.gate_set = gate_set
             self.evals, self.evecs = transform_graph(layout)
             self.gates, self.gate_qubits, _ = get_gate_vectors(layout, gate_set)
             self.n = layout.shape[0]
@@ -297,7 +506,6 @@ class DataHolder:
             self.gate_qubits = gate_qubits
             self.n = evals.shape[-1]
             self.g = self.gates.shape[-1]
-            self.gate_set = [np.unique(gates) for gates in self.gates]
 
         self.prepare_for_inference()
 
@@ -310,6 +518,12 @@ class DataHolder:
             self.gates = torch.tensor(self.gates, dtype=torch.long)
         if not torch.is_tensor(self.gate_qubits):
             self.gate_qubits = torch.tensor(self.gate_qubits, dtype=torch.long)
+
+    def remove_batch(self, is_batch_unprepped: np.ndarray):
+        self.evals = self.evals[~is_batch_unprepped]
+        self.evecs = self.evecs[~is_batch_unprepped]
+        self.gates = self.gates[~is_batch_unprepped]
+        self.gate_qubits = self.gate_qubits[~is_batch_unprepped]
 
     def replicate(
         self, rep
@@ -396,14 +610,8 @@ class InferWrapper:
         beam = [beam[i] for i in top_indices]
         return beam, gate_prediction_logit[top_indices], depth_prediction[top_indices]
 
-    def _create_simulators(
-        self, layouts: np.ndarray, gates: np.ndarray
-    ) -> list[Simulator]:
-        simulator_list = []
-        for layout, gate in zip(layouts, gates):
-            gate_set = np.unique(gate)
-            simulator_list.append(Simulator(layout, gate_set, None))
-        return simulator_list
+    def _create_simulators(self, layouts: np.ndarray, gates: np.ndarray) -> BatchSimulator:
+        return BatchSimulator(layouts, gates)
 
     def infer(
         self,
@@ -489,11 +697,12 @@ class InferWrapper:
         """
         High level function to run inference on a given problem for unpreparing state.
         Args:
-            layout: (np.ndarray) Boolean adjacency matrix of size (n, n)
-            gate_set: (np.ndarray) list of int representations of GateTypes. Look at the dictionary
-                `name_dict` for the mapping.
-            target: (np.ndarray) Boolean starting stabilizer of size (2*n+1), in the form
-                [X1 ... Xn Z1 ... Zn Sign]
+            layout: (np.ndarray) (bs, n, n)
+            evals: (np.ndarray) (bs, n)
+            evecs: (np.ndarray) (bs, n, n)
+            gates: (np.ndarray) (bs, g)
+            gate_qubits: (np.ndarray) (bs, 2*g)
+            targets: (np.ndarray) (bs, 2*n+n)
             beam_width: (int)
         """
         # Initialize variables
@@ -502,23 +711,40 @@ class InferWrapper:
             evals=evals, evecs=evecs, gates=gates, gate_qubits=gate_qubits
         )
         observation = torch.tensor(targets).to(self.device)  # (1, bs, 2n+1)
-        curr_beam = Path(
-            data.n,
-            observation,
-            torch.empty(batch_size, device=self.device),
-            torch.empty(batch_size, device=self.device),
-            None,
-        )
-        simulators = self._create_simulators(layouts, gates)
+
+        simulator = self._create_simulators(layouts, np.unique(gates, axis=-1))
+        output_paths = []
         depth = 0
+        width = 1
 
         with torch.no_grad():
             while depth < self.max_depth:
+                # print(f"Iteration {depth}")
+                ############
+                # Expand beam with new elements.
+                ############
+                if depth == 0:
+                    curr_beam = Path(
+                        data.n,
+                        observation,
+                        None,  # float
+                        None,  # int32
+                        width=1,
+                        bs=batch_size,
+                    )
+                else:
+                    gate_predictions = nn.Softmax(-1)(gate_prediction_logit)
+                    expansion_ratio = 4
+                    _, top_gates = torch.topk(gate_predictions, expansion_ratio, dim=-1)
+                    batch_size, width, unprepped_batches = curr_beam.update_states(
+                        top_gates, output_paths, simulator
+                    )
+                    simulator.remove_batch(unprepped_batches)
+                    data.remove_batch(unprepped_batches)
+
                 ############
                 # Calculate predicted cost
                 ############
-                width = curr_beam.observations.shape[0] // batch_size
-                print(f"Iteration: {depth}")
                 evals, evecs, gates, gate_qubits = data.replicate(width)
                 gate_prediction_logit, depth_prediction = self.model.forward(
                     evals.to(self.device),  # (width * bs, n)
@@ -545,21 +771,10 @@ class InferWrapper:
                     width, batch_size, -1
                 )
                 gate_prediction_logit = gate_prediction_logit[top_indices, cols]
-
-                ############
-                # Expand beam with new elements.
-                ############
-                gate_predictions = nn.Softmax(-1)(gate_prediction_logit)
-                expansion_ratio = 4
-                _, top_gates = torch.topk(gate_predictions, expansion_ratio, dim=-1)
                 curr_beam.filter_beam(top_indices)
-                curr_beam.append_tensors(top_gates, depth_prediction)
-                curr_beam.update_observations(simulators, batch_size, expansion_ratio)
+                curr_beam.append_depth_tensor(depth_prediction)
 
                 depth += 1
 
-            # curr_beam, _gp, _d = self._explore_and_truncate_beam(
-            #     curr_beam, n, eval, evec, gates, gate_qubits, beam_width
-            # )
-
-        return curr_beam, True  # is_successfully_unprepared(curr_beam)
+        curr_beam.append_to(output_paths)
+        return output_paths  # is_successfully_unprepared(curr_beam)

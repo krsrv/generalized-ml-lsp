@@ -4,13 +4,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from inference.infer import (
-    InferWrapper,
-    Path,
-    format_observation,
-    get_gate_literals,
-    name_dict,
-)
+from inference.infer import InferWrapper, Path, format_observation, get_gate_literals, name_dict
 from models.model_v0 import ModelV0
 from training.dataset import UnprepNpzDataloader
 
@@ -37,92 +31,145 @@ def elapsed_str(elapsed, curr_batch_idx, total_batches):
     return f"Iterated over {curr_batch_idx} batches ({elapsed} s)| Avg time: {avg_time:.7f} s/batch | Estimated time left for epoch: {est_str}"
 
 
-model = ModelV0(
-    128,
-    32,
-    64,
-    32,
-    32,
-    hetero_attention_embed_dim=100,
-)
-
-wrapper = InferWrapper(
-    model,
-    "output/full_run_2_10-epochs=20-lr=0.001-beta=(0.9, 0.999)-iter-6/model-13-10828.pt",
-    20,
-)
-
-full_dataset = UnprepNpzDataloader("training-data/split/2-10-validation.npz")
-
-# full_dataset.set_batch_size(1)
-np.random.seed(1)
-
-unprepped_successfully = []  # Unprepped correctly
-unprepped_optimally = []  # Unprepped in the correct number of gates
-depth_prediction = []  # Model's prediction of depth
-depth_inference = []  # Max depth that model tried for before termination
-actual_depth = []
-
-tic = time.time()
-for i, data in enumerate(iter(full_dataset)):
-    if i >= 10:
-        break
-    layout = np.squeeze(data["layout"][0, :, :])
-    n = layout.shape[0]
-    gate_set = np.unique(np.squeeze(data["gate_oh"][0, :])).astype(int)
-    target = np.squeeze(data["observation"][0, :]).astype(int)
-
-    # curr_beam, success = wrapper.infer(layout, gate_set, target.flatten(), beam_width=5)
-    curr_beam, success = wrapper.infer_batch(
-        data["layout"],
-        data["eigval"],
-        data["eigvec"],
-        data["gate_oh"],
-        data["gate_qubit_oh"],
-        data["observation"],
-        beam_width=5,
+def run_inference(
+    model_file: str,
+    dataset_file: str,
+    output_file: str,
+    max_depth: int,
+    batch_size: int,
+    beam_width: int,
+):
+    model = ModelV0(
+        128,
+        32,
+        64,
+        32,
+        32,
+        hetero_attention_embed_dim=100,
+    )
+    wrapper = InferWrapper(
+        model,
+        model_file,
+        max_depth,
     )
 
-    # unprepped_successfully.append(success)
-    # for path in curr_beam:
-    #     if Path.is_successfully_unprepared([path], n):
-    #         # All paths are guaranteed to be of same depth, so break out of loop
-    #         # once depth condition has been checked.
-    #         if data["depth"][0] == len(path.gates):
-    #             unprepped_optimally.append(True)
-    #         break
+    full_dataset = UnprepNpzDataloader(dataset_file, shuffle=False)
 
-    # depth_prediction.append(curr_beam[0].depths[0])
-    # if success:
-    #     depth_inference.append(len(curr_beam[0].gates))
-    # else:
-    #     depth_inference.append(len(curr_beam[0].gates) + 1)
+    full_dataset.set_batch_size(batch_size)
 
-    # actual_depth.append(data["depth"][0])
+    unprepped_successfully = []  # Unprepped correctly
+    unprepped_optimally = []  # Unprepped in the correct number of gates
+    depth_prediction = []  # Model's prediction of depth
+    depth_inference = []  # Max depth that model tried for before termination
+    actual_depth = []
 
-    if i % 10 == 0:
-        print(elapsed_str(time.time() - tic, i, full_dataset.get_total_size()))
+    tic = time.time()
+    for i, data in enumerate(iter(full_dataset)):
+        # print(f"Batch {i}: {data["layout"].shape[-1]}, {data["gate_oh"].shape[-1]}")
+        # continue
+        output_paths = wrapper.infer_batch(
+            data["layout"],
+            data["eigval"],
+            data["eigvec"],
+            data["gate_oh"],
+            data["gate_qubit_oh"],
+            data["observation"],
+            beam_width=beam_width,
+        )
+        for i, path in enumerate(output_paths):
+            # print("Depth shape", path.depths.shape)
+            # print("Gate shape", path.gates.shape)
+            if path.unprepped:
+                # All paths are guaranteed to be of same depth
+                if data["depth"][i] == len(path.gates):
+                    unprepped_optimally.append(True)
+                depth_inference.append(len(path.gates))
+            else:
+                depth_inference.append(max_depth + 1)
+            depth_prediction.append(path.depths[0][0])
+            unprepped_successfully.append(path.unprepped)
 
-# unprepped_successfully = np.array(unprepped_successfully)
-# unprepped_optimally = np.array(unprepped_optimally)
-# depth_inference = np.array(depth_inference)
-# actual_depth = np.array(actual_depth)
+        actual_depth.append(data["depth"])
 
-# print(f"Total datapoints: {full_dataset.get_total_size()}")
-# print(f"Number of correct inferences: {np.count_nonzero(unprepped_successfully)}")
-# print(f"Number of optimal inferences: {np.count_nonzero(unprepped_optimally)}")
-# print(f"Depth metric:")
-# print(f"    Average: {np.mean(depth_inference)}")
-# print(f"    Median: {np.median(depth_inference)}")
-# print(f"    Stddev: {np.std(depth_inference)}")
+        if i % 1000 == 0:
+            np.savez(
+                output_file,
+                depth_inference=depth_inference,
+                depth_prediction=depth_prediction,
+                actual_depth=actual_depth,
+                unprepped_successfully=unprepped_successfully,
+            )
+            print(
+                elapsed_str(
+                    time.time() - tic,
+                    i,
+                    full_dataset.get_total_size() / full_dataset.batch_size,
+                )
+            )
 
-# print(f"Actual depths:")
-# print(f"    Average: {np.mean(actual_depth)}")
-# print(f"    Median: {np.median(actual_depth)}")
-# print(f"    Stddev: {np.std(actual_depth)}")
+    unprepped_successfully = np.array(unprepped_successfully)
+    unprepped_optimally = np.array(unprepped_optimally)
+    depth_inference = np.array(depth_inference)
+    depth_prediction = np.array(depth_prediction)
+    actual_depth = np.array(actual_depth)
 
-# difference = actual_depth - depth_inference
-# print(f"Difference:")
-# print(f"    Average: {np.mean(difference)}")
-# print(f"    Median: {np.median(difference)}")
-# print(f"    Stddev: {np.std(difference)}")
+    # print(f"Total datapoints: {full_dataset.get_total_size()}")
+    # print(f"Number of correct inferences: {np.count_nonzero(unprepped_successfully)}")
+    # # print(f"Number of optimal inferences: {np.count_nonzero(unprepped_optimally)}")
+    # print(f"Depth metric:")
+    # print(f"    Average: {np.mean(depth_inference)}")
+    # print(f"    Median: {np.median(depth_inference)}")
+    # print(f"    Stddev: {np.std(depth_inference)}")
+
+    # print(f"Actual depths:")
+    # print(f"    Average: {np.mean(actual_depth)}")
+    # print(f"    Median: {np.median(actual_depth)}")
+    # print(f"    Stddev: {np.std(actual_depth)}")
+
+    # difference = actual_depth - depth_inference
+    # print(f"Difference:")
+    # print(f"    Average: {np.mean(difference)}")
+    # print(f"    Median: {np.median(difference)}")
+    # print(f"    Stddev: {np.std(difference)}")
+
+    np.savez(
+        output_file,
+        depth_inference=depth_inference,
+        depth_prediction=depth_prediction,
+        actual_depth=actual_depth,
+        unprepped_successfully=unprepped_successfully,
+    )
+
+
+if __name__ == "__main__":
+    # INSERT_YOUR_CODE
+    import argparse
+    import os
+
+    parser = argparse.ArgumentParser(description="Inference parameters")
+    parser.add_argument("--beam-width", type=int, default=5, required=True, help="Beam width")
+    parser.add_argument("--max-depth", type=int, default=10, required=True, help="Max depth")
+    parser.add_argument("--batch-size", type=int, default=32, required=True, help="Batch size")
+    args = parser.parse_args()
+    print(f"Args: {args}")
+
+    args.model_file = (
+        "output/full_run_2_10-epochs=20-lr=0.001-beta=(0.9, 0.999)-iter-7/model-18-33698.pt"
+    )
+    args.dataset = "training-data/split/2-10-validation.npz"
+    parent_dir = os.path.dirname(args.model_file)
+    args.output_file = os.path.join(
+        parent_dir, f"parallel-inference-bw-{args.beam_width}-md-{args.max_depth}.npz"
+    )
+    print(f"Output file: {args.output_file}")
+
+    seed = 1
+    np.random.seed(seed)
+    run_inference(
+        args.model_file,
+        args.dataset,
+        args.output_file,
+        args.max_depth,
+        args.batch_size,
+        args.beam_width,
+    )
