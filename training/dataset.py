@@ -58,6 +58,7 @@ class UnprepNpzDataloader:
         self.load_file(file)
         self.construct_metadata()
         self.shuffle = shuffle
+        self.rng = np.random.default_rng()
         self.batch_size = 64
 
     @timeit
@@ -175,6 +176,7 @@ class UnprepNpzDataloader:
 
         # Extract the current (n, g) key
         k, idxs = self.iter_order[self.iter_idx]
+        size = len(idxs)
         n, g = k
 
         # Return the data
@@ -183,12 +185,23 @@ class UnprepNpzDataloader:
         eval, evec = transform_graph(
             data[f"layout"].reshape((num_samples, n, n))[idxs, :, :]
         )
+        # Shuffle the gate inputs
+        gates = data[f"gate_oh"].reshape((num_samples, -1))[idxs, :]
+        gate_qubits = data[f"gate_qubit_oh"].reshape((num_samples, -1))[idxs, :]
+        if self.shuffle:
+            shuffle_order = np.arange(size)
+            self.rng.shuffle(shuffle_order)
+            gates = gates[shuffle_order]
+            gate_qubits = gate_qubits.reshape(size, -1, 2)[shuffle_order].reshape(
+                size, -1
+            )
+        # Construct the input
         object = {
             "layout": data[f"layout"].reshape((num_samples, n, n))[idxs, :, :],
             "eigval": eval,
             "eigvec": evec,
-            "gate_oh": data[f"gate_oh"].reshape((num_samples, -1))[idxs, :],
-            "gate_qubit_oh": data[f"gate_qubit_oh"].reshape((num_samples, -1))[idxs, :],
+            "gate_oh": gates,
+            "gate_qubit_oh": gate_qubits,
             "observation": data[f"observation"].reshape((num_samples, -1))[idxs, :],
             "gate": data[f"gate"][idxs],
             "depth": data[f"depth"][idxs],
