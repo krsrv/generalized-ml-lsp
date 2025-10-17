@@ -184,62 +184,6 @@ class BatchSimulator:
         return new_state, is_unprepped
 
 
-class Simulator:
-    """
-    Simulate stabilizer circuits
-    """
-
-    def __init__(self, layout: np.ndarray, gate_set: np.ndarray, rgd: dict):
-        self.layout = layout
-        self.n = self.layout.shape[0]
-        self.gate_set = gate_set
-        self.rgd = rgd
-        self.construct_input_format()
-
-    def set_state(self, state):
-        self.state = state
-
-    def construct_input_format(self):
-        self.layout_input = []
-        for i in range(self.n):
-            for j in range(self.n):
-                if j <= i:
-                    continue
-                if self.layout[i, j] or self.layout[i, j] == 1:
-                    self.layout_input += [i, j]
-        self.layout_input = [len(self.layout_input) // 2] + self.layout_input
-
-        self.gate_set_input = [self.gate_set.shape[0]]
-        for i in self.gate_set:
-            self.gate_set_input += [i]
-
-    def step(self, gate):
-        # Prepare the arguments as strings
-        args = [
-            "../lsp_nonn/src/simulator.out",
-            str(self.n),
-            *[str(x) for x in self.layout_input],
-            *[str(x) for x in self.gate_set_input],
-            "".join([str(x) for x in self.state]),
-            str(gate),
-        ]
-        # print(" ".join(args))
-        result = subprocess.run(
-            args,
-            capture_output=True,
-            text=True,
-        )
-        # Parse the output from the external executable
-        if result.returncode != 0:
-            # Print stderr for debugging
-            print("Simulator stderr:", result.stderr)
-            print(f"Arguments: {' '.join(args)}")
-            raise RuntimeError(f"Simulator failed: {result.stderr}")
-        new_state = np.array([int(c) for c in result.stdout.strip()])
-        self.set_state(new_state)
-        return new_state
-
-
 class Path:
     """
     Class for each path in beam search.
@@ -566,15 +510,6 @@ class InferWrapper:
 
         self._set_device()
 
-    def _should_terminate(self, beam: list[Path], n: int, depth: int) -> bool:
-        """
-        Check whether any of the paths in the beam have been successfully unprepared to the
-        all 0 state.
-        """
-        if depth > self.max_depth:
-            return True
-        return is_successfully_unprepared(beam)
-
     def _set_device(self):
         if hasattr(self, "device") and self.device is not None:
             return
@@ -582,107 +517,8 @@ class InferWrapper:
         self.model.to(self.device)
         print(f"Model now on device={self.device}")
 
-    def _run_inference_on_beam(self, beam, eval, evec, gates, gate_qubits):
-        width = len(beam)
-        gate_prediction_logit, depth_prediction = self.model.forward(
-            torch.unsqueeze(eval, dim=0).expand(width, -1).to(self.device),
-            torch.unsqueeze(evec, dim=0).expand(width, -1, -1).to(self.device),
-            torch.unsqueeze(gates, dim=0).expand(width, -1).to(self.device),
-            torch.unsqueeze(gate_qubits, dim=0).expand(width, -1).to(self.device),
-            torch.tensor(np.array([x.observations[-1] for x in beam])).to(self.device),
-        )
-        return gate_prediction_logit.to("cpu"), depth_prediction.to("cpu")
-
-    def _explore_and_truncate_beam(
-        self, beam, n, eval, evec, gates, gate_qubits, beam_width
-    ):
-        """
-        Run model inference to get the depth estimates and truncate to `beam_width` elements
-        """
-        gate_prediction_logit, depth_prediction = self._run_inference_on_beam(
-            beam, eval, evec, gates, gate_qubits
-        )
-        costs = (depth_prediction.detach().numpy() + 1) * n * n / 4
-        k = min(beam_width, len(costs))
-        top_indices = np.argpartition(costs, max(0, k - 1))[:k]
-        # print(f"Costs: {costs}")
-        # print(f"Top indices: {top_indices}")
-        beam = [beam[i] for i in top_indices]
-        return beam, gate_prediction_logit[top_indices], depth_prediction[top_indices]
-
     def _create_simulators(self, layouts: np.ndarray, gates: np.ndarray) -> BatchSimulator:
         return BatchSimulator(layouts, gates)
-
-    def infer(
-        self,
-        layout: np.ndarray,
-        gate_set: np.ndarray,
-        target: np.ndarray,
-        beam_width: int = 1,
-    ) -> (list[Path], bool):
-        """
-        High level function to run inference on a given problem for unpreparing state.
-        Args:
-            layout: (np.ndarray) Boolean adjacency matrix of size (n, n)
-            gate_set: (np.ndarray) list of int representations of GateTypes. Look at the dictionary
-                `name_dict` for the mapping.
-            target: (np.ndarray) Boolean starting stabilizer of size (2*n+1), in the form
-                [X1 ... Xn Z1 ... Zn Sign]
-            beam_width: (int)
-        """
-        data = DataHolder(layout=layout, gate_set=gate_set)
-        simulator = Simulator(layout, gate_set, None)
-        depth = 0
-        simulator.set_state(target)
-        observation = torch.tensor(target)
-
-        curr_beam = [Path(data.n, [target], [], [], +torch.inf)]
-        new_beam = []
-
-        while not self._should_terminate(curr_beam, data.n, depth):
-            # Calculate predicted cost and truncate beam to beam_width
-            curr_beam, gate_prediction_logit, depth_prediction = (
-                self._explore_and_truncate_beam(
-                    curr_beam,
-                    data.n,
-                    data.evals,
-                    data.evecs,
-                    data.gates,
-                    data.gate_qubits,
-                    beam_width,
-                )
-            )
-
-            # Expand beam with new elements.
-            gate_predictions = nn.Softmax(-1)(gate_prediction_logit.detach())
-            for i, gate_prediction in enumerate(gate_predictions):
-                top4 = gate_prediction.squeeze().numpy().argsort()[-4:][::-1]
-                for gate in top4:
-                    simulator.set_state(curr_beam[i].observations[-1])
-                    observation = simulator.step(gate)
-                    new_beam.append(
-                        Path(
-                            data.n,
-                            curr_beam[i].observations + [observation],
-                            curr_beam[i].depths + [depth_prediction.detach()[i]],
-                            curr_beam[i].gates + [gate],
-                            (depth_prediction.detach()[i] + 1) * data.n * data.n / 4,
-                        )
-                    )
-            curr_beam = new_beam
-            new_beam = []
-            depth += 1
-
-        curr_beam, _gp, _d = self._explore_and_truncate_beam(
-            curr_beam,
-            data.n,
-            data.evals,
-            data.evecs,
-            data.gates,
-            data.gate_qubits,
-            beam_width,
-        )
-        return curr_beam, is_successfully_unprepared(curr_beam)
 
     def infer_batch(
         self,
