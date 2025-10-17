@@ -159,7 +159,8 @@ if __name__ == "__main__":
     args.dataset = "training-data/split/2-10-validation.npz"
     parent_dir = os.path.dirname(args.model_file)
     args.output_file = os.path.join(
-        parent_dir, f"parallel-inference-bw-{args.beam_width}-md-{args.max_depth}.npz"
+        parent_dir,
+        f"parallel-inference-bw-{args.beam_width}-md-{args.max_depth}-bs-{args.batch_size}.npz",
     )
     print(f"Output file: {args.output_file}")
 

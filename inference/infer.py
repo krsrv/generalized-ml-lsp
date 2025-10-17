@@ -718,8 +718,11 @@ class InferWrapper:
         width = 1
 
         with torch.no_grad():
-            while depth < self.max_depth:
-                # print(f"Iteration {depth}")
+            # Model inference runs only `self.max_depth` times. But simulation for each gate
+            # prediction in i-th iter happens at beginning of the (i+1)-th loop. The
+            # `self.max_depth+1`-th iter only runs the simulation and then breaks out of the
+            # loop.
+            while depth < self.max_depth + 1:
                 ############
                 # Expand beam with new elements.
                 ############
@@ -741,6 +744,9 @@ class InferWrapper:
                     )
                     simulator.remove_batch(unprepped_batches)
                     data.remove_batch(unprepped_batches)
+                    # Break the loop after simulating the last set of gates.
+                    if depth == self.max_depth:
+                        break
 
                 ############
                 # Calculate predicted cost
@@ -777,4 +783,4 @@ class InferWrapper:
                 depth += 1
 
         curr_beam.append_to(output_paths)
-        return output_paths  # is_successfully_unprepared(curr_beam)
+        return output_paths
