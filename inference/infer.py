@@ -238,23 +238,31 @@ class Path:
 
     def is_successfully_unprepared(self):
         """
-        Return true if any of the input paths is an all 0 state.
+        For each path (# = self.width * self.bs), return True iff the observation corresponds to
+        a ground state. The returned tensor is a bool tensor of size (width * bs).
+        Note that this function is not required for running batch inference, and is provided as a
+        helper function. In batch inference, the simulator module already computes this function
+        using the ctypes library.
         """
         observations = self.observations.reshape(self.width, self.bs, -1)
-        observations = observations.transpose(0, 1)
+        observations = observations.transpose(0, 1).reshape(self.width * self.bs, self.n, -1)
 
-        def is_ground_state(subtensor):
-            # Example: check if all elements in the (bs, n) subtensor are zero
+        def is_ground_state(subtensor: torch.Tensor):
             return (
-                np.all(subtensor[:, :n] == 0)  # No X
-                and np.all(subtensor[:, -1] == 0)  # No '-' sign
-                and np.count_nonzero(subtensor == 1) == n  # Exactly n 1s
+                torch.all(subtensor[:, : self.n] == 0)  # No X
+                and torch.all(subtensor[:, -1] == 0)  # No '-' sign
+                and (
+                    torch.count_nonzero(subtensor == 1, 1) == torch.ones(self.n, dtype=torch.int)
+                )  # Exactly n 1s
             )
-            return torch.all(subtensor == 0)
 
         # There is no torch.apply or torch.map for tensors, so we use a list comprehension
-        # return torch.stack([check_valid(obs) for obs in observations])
-        return Path._is_all_Z_state(self.observations[-1], self.n)
+        return (
+            torch.stack([is_ground_state(obs) for obs in observations])
+            .reshape(self.bs, self.width)
+            .transpose(0, 1)
+            .reshape(-1)
+        )
 
     def filter_beam(self, top_indices: torch.Tensor):
         """
