@@ -1,15 +1,11 @@
+import time
+
 import numpy as np
+import qiskit
 import torch
 import torch.nn as nn
 
-from inference.infer import (
-    InferWrapper,
-    Simulator,
-    format_observation,
-    get_gate_literals,
-    name_dict,
-    print_gate_keys,
-)
+from inference.infer import InferWrapper, format_observation, get_gate_literals, name_dict
 from models.model_v0 import ModelV0
 from training.dataset import UnprepNpzDataloader
 
@@ -21,22 +17,6 @@ Gate set:
     lsp::GateType::sqrtXdg, lsp::GateType::CX, lsp::GateType::CZ
 ]
 """
-
-model = ModelV0(
-    128,
-    32,
-    64,
-    32,
-    32,
-    hetero_attention_embed_dim=100,
-)
-
-wrapper = InferWrapper(
-    model,
-    # "output/full_run-epochs=5-lr=0.001-beta=(0.9, 0.999)-iter-9/model-1-10000.pt",
-    "output/full_run_2_10-epochs=5-lr=0.001-beta=(0.9, 0.999)-iter-2/model-3-15000.pt",
-    5,
-)
 
 # n = 3
 # layout = np.array([[0, 1, 1], [1, 0, 1], [1, 1, 0]])
@@ -51,82 +31,123 @@ wrapper = InferWrapper(
 #     ]
 # )
 
-# # Check loss values for samples picked directly from the training set.
-# np.random.seed(4)
-train_data = UnprepNpzDataloader("training-data/compiled/2-10-validation.npz")
-# for i, data in enumerate(iter(train_data)):
-#     # data = next(iter(train_data))
-#     if i > 5:
-#         break
-#     gate_prediction, depth_prediction = model.forward(
-#         torch.tensor(data["eigval"], dtype=torch.float),
-#         torch.tensor(data["eigvec"], dtype=torch.float),
-#         torch.tensor(data["gate_oh"], dtype=torch.long),
-#         torch.tensor(data["gate_qubit_oh"], dtype=torch.long),
-#         torch.tensor(data["observation"], dtype=torch.bool),
-#     )
-#     # print(
-#     #     f"""
-#     # Input:
-#     # Eigval -> {data["eigval"][0, :]}
-#     # Eigvec -> {data["eigvec"][0, :, :]}
-#     # Gates -> {data["gate_oh"][0, :]}
-#     # Gate qubits -> {data["gate_qubit_oh"][0, :].reshape(-1, 2)}
-#     # Observation -> {data["observation"][0,:].astype(int)}
-#     # """
-#     # )
 
-#     gate_loss = nn.CrossEntropyLoss()(
-#         gate_prediction, torch.tensor(data["gate"], dtype=torch.int64)
-#     )
-#     print(gate_prediction[0, :].detach().numpy())
-#     print(f"Gate loss for {i} batch {gate_loss}")
+def get_qiskit_circuit(n: int, layout: np.ndarray, gate_set: np.ndarray, gates: np.ndarray):
+    qc = qiskit.QuantumCircuit(n)
+    gates = get_gate_literals(gates, layout, gate_set)
+    for gate in gates:
+        split_parts = gate.split("-")
+        gate_type = split_parts[0]
+        qubit_indices = [int(idx) for idx in split_parts[1:]]
+        match gate_type:
+            case "H":
+                qc.h(qubit_indices[0])
+            case "S":
+                qc.s(qubit_indices[0])
+            case "Sdg":
+                qc.sdg(qubit_indices[0])
+            case "Z":
+                qc.z(qubit_indices[0])
+            case "X":
+                qc.x(qubit_indices[0])
+            case "sqrtX":
+                qc.sx(qubit_indices[0])
+            case "sqrtXdg":
+                qc.sxdg(qubit_indices[0])
+            case "CX":
+                qc.cx(qubit_indices[0], qubit_indices[1])
+            case "CZ":
+                qc.cz(qubit_indices[0], qubit_indices[1])
+            case _:
+                raise ValueError(f"Unknown gate type: {gate_type}")
+    return qc
 
-# print()
-# print()
 
-# train_data.set_batch_size(1)
-np.random.seed(1)
-for i, data in enumerate(iter(train_data)):
-    # data = next(iter(train_data))
-    if i >= 4:
-        break
-    layout = np.squeeze(data["layout"][0, :, :])
-    n = layout.shape[0]
-    gate_set = np.unique(np.squeeze(data["gate_oh"][0, :])).astype(int)
-    target = np.squeeze(data["observation"][0, :]).astype(int)
+def run_inference_train(
+    model: nn.Module,
+    dataset: "DataLoader",
+    max_depth: int,
+    beam_width: int,
+):
+    wrapper = InferWrapper(model, None, max_depth)
 
-    # simulator = Simulator(layout, gate_set, None)
-    # simulator.set_state(target.flatten())
-    # simulator.step(0)
-    # print(simulator.state)
+    tic = time.time()
+    for i, data in enumerate(iter(dataset)):
+        if i > 1:
+            break
+        assert data["layout"].shape[0] == 1, "Batch size should be 1."
+        n = data["layout"].shape[-1]
+        output_paths = wrapper.infer_batch(
+            data["layout"],
+            data["eigval"],
+            data["eigvec"],
+            data["gate_oh"],
+            data["gate_qubit_oh"],
+            data["observation"],
+            beam_width=beam_width,
+        )
+        path = output_paths[0]
+        path.gates = path.gates.numpy()
+        gate_set = np.unique(data["gate_oh"][0])
+        print(f"Gate set: {gate_set}")
+        for i in range(7):
+            x = data["observation"][0][15 * i : 15 * (i + 1)].astype(int)
+            print(f"Observation: {', '.join(str(v) for v in x)}")
+        print(f"Gate: {data["gate"]}")
+        qcs = []
+        print(path.gates.shape)
+        for gates in path.gates:
+            qcs.append(get_qiskit_circuit(n, data["layout"][0], gate_set, gates))
+            print(f"Proposed gates: {gates}")
 
-    print(f"Num qubits: {n}")
-    print(f"Available gates: {[name_dict[gate] for gate in gate_set]}")
-    # print(f"Layout: {layout}")
-    print(f"Starting state: {format_observation(target.flatten(), n)}")
-    # print_gate_keys(layout, gate_set)
+        print(f"Datapoint #{i}:")
+        print(f"Input state: {format_observation(data["observation"], n)}")
+        print(f"Allowed gates: {[name_dict[gate] for gate in gate_set]}")
+        print("Unprepped successfully !!!!" if path.unprepped else "Unable to unprep :(")
+        print(f"Proposed circuit:")
+        for qc in qcs:
+            print(qc)
+        # print(f"Gate debug:")
+        # for gates in path.gates:
+        #     print(f"{get_gate_literals(gates, data['layout'][0], gate_set)}")
+        print(
+            f"True gate: {get_gate_literals(data["gate"], data["layout"][0], gate_set)[0]}, {data["gate"][0]}"
+        )
+        depth_prediction = (path.depths[0][0] + 2.2) * 2
+        print(f"Depth: {depth_prediction} (predicted) vs {data["depth"][0]} (actual)")
+        print("\n\n\n")
 
-    curr_beam, success = wrapper.infer(layout, gate_set, target.flatten(), beam_width=5)
-    print(f"Success? {'YESS!!!!!!!' if success else ':('}")
-    # gate_list, observation_list, depth_list, gp_logit = wrapper.infer(
-    #     layout, gate_set, target.flatten()
-    # )
-    # gates = wrapper.get_gate_literals(gate_list, layout, gate_set)
-    # stabilizers = [format_observation(x, n) for x in observation_list]
-    # for g, s in zip(gates, stabilizers[1:]):
-    #     print(f"{g}: {s}")
-    # print(depth_list)
-    # print(
-    #     nn.CrossEntropyLoss()(
-    #         gp_logit, torch.tensor([data["gate"][0]], dtype=torch.long)
-    #     )
-    # )
+        # Print gate losses over inference train
 
-    print()
-    print(f"Actual depth: {np.squeeze(data['depth'][0])}")
-    print(
-        f"Actual gate: {np.squeeze(data['gate'][0])} = {get_gate_literals([data['gate'][0]], layout, gate_set)[0]}"
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Inference parameters")
+    parser.add_argument("--beam-width", type=int, default=5, required=True, help="Beam width")
+    parser.add_argument("--max-depth", type=int, default=10, required=True, help="Max depth")
+    args = parser.parse_args()
+    print(f"Args: {args}")
+
+    seed = 1
+    np.random.seed(seed)
+    model_file = (
+        "output/full_run_2_10-epochs=20-lr=0.001-beta=(0.9, 0.999)-iter-7/model-18-33698.pt"
     )
-    print()
-    print()
+    dummy_wrapper = InferWrapper(
+        ModelV0(
+            128,
+            32,
+            64,
+            32,
+            32,
+            hetero_attention_embed_dim=100,
+        ),
+        model_file,
+        1,
+    )
+
+    dataset = UnprepNpzDataloader("training-data/split/2-10-validation.npz", shuffle=False)
+    dataset.set_batch_size(1)
+
+    run_inference_train(dummy_wrapper.model, dataset, args.max_depth, args.beam_width)
