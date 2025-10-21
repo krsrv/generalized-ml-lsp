@@ -182,19 +182,9 @@ class UnprepNpzDataloader:
         # Return the data
         data = self.cache[f"{n}/{g}"]
         num_samples = data[f"gate"].shape[0]
-        eval, evec = transform_graph(
-            data[f"layout"].reshape((num_samples, n, n))[idxs, :, :]
-        )
-        # Shuffle the gate inputs
+        eval, evec = transform_graph(data[f"layout"].reshape((num_samples, n, n))[idxs, :, :])
         gates = data[f"gate_oh"].reshape((num_samples, -1))[idxs, :]
         gate_qubits = data[f"gate_qubit_oh"].reshape((num_samples, -1))[idxs, :]
-        if self.shuffle:
-            shuffle_order = np.arange(size)
-            self.rng.shuffle(shuffle_order)
-            gates = gates[shuffle_order]
-            gate_qubits = gate_qubits.reshape(size, -1, 2)[shuffle_order].reshape(
-                size, -1
-            )
         # Construct the input
         object = {
             "layout": data[f"layout"].reshape((num_samples, n, n))[idxs, :, :],
