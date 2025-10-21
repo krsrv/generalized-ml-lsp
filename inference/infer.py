@@ -50,8 +50,7 @@ def get_gate_vectors(layout: np.ndarray, gate_set: list) -> (list, list, dict):
                         continue
                     if layout[i, j]:
                         gates += [gate]
-                        # gate_qubits += [i + 1, j + 1] # Correct
-                        gate_qubits += [j + 1, i + 1]  # Incorrect
+                        gate_qubits += [i + 1, j + 1]
                         reverse_gate_dict[idx] = f"{name_dict[gate]}-{i}-{j}"
                         idx += 1
             if not is_symmetric_gate(gate):
@@ -61,8 +60,7 @@ def get_gate_vectors(layout: np.ndarray, gate_set: list) -> (list, list, dict):
                             continue
                         if layout[i, j]:
                             gates += [gate]
-                            gate_qubits += [i + 1, j + 1]  # incorrect
-                            # gate_qubits += [j + 1, i + 1] # correct
+                            gate_qubits += [j + 1, i + 1]
                             reverse_gate_dict[idx] = f"{name_dict[gate]}-{j}-{i}"
                             idx += 1
     return gates, gate_qubits, reverse_gate_dict
@@ -73,7 +71,7 @@ def format_observation(obs: np.ndarray, n: int):
     pauli_map = {0: "I", 1: "X", 2: "Z", 3: "Y"}
     output = []
     for row in obs:
-        pauli_value = (row[:n] + 2 * row[n : 2 * n])[::-1]
+        pauli_value = row[:n] + 2 * row[n : 2 * n]
         pauli = [pauli_map[x] for x in pauli_value]
         sign = "+" if row[-1] == 0 else "-"
         output.append(sign + "".join(pauli))
@@ -307,6 +305,11 @@ class Path:
             self.depths = self.depths.reshape(self.width * self.bs, -1)
 
     def append_to(self, path_list: list["Path"]):
+        if self.bs == 0:
+            self.observations = None
+            self.depths = None
+            self.gates = None
+            return
         self.observations = self.observations.reshape(self.width, self.bs, -1).transpose(0, 1)
         self.depths = self.depths.reshape(self.width, self.bs, -1).transpose(0, 1)
         self.gates = self.gates.reshape(self.width, self.bs, -1).transpose(0, 1)
@@ -408,13 +411,18 @@ class Path:
             )
         # Filter out unprepped states from current state variables
         self.bs = bs = self.bs - np.count_nonzero(is_batch_unprepped)
-        self.gates = self.gates[~is_batch_unprepped].transpose(0, 2).reshape(k * bw * bs, -1)
-        self.depths = self.depths[~is_batch_unprepped].transpose(0, 2).reshape(k * bw * bs, -1)
-        self.observations = (
-            torch.tensor(self.observations[~is_batch_unprepped], device=self.gates.device)
-            .permute(2, 1, 0, 3)
-            .reshape(k * bw * bs, -1)
-        )
+        if self.bs != 0:
+            self.gates = self.gates[~is_batch_unprepped].transpose(0, 2).reshape(k * bw * bs, -1)
+            self.depths = self.depths[~is_batch_unprepped].transpose(0, 2).reshape(k * bw * bs, -1)
+            self.observations = (
+                torch.tensor(self.observations[~is_batch_unprepped], device=self.gates.device)
+                .permute(2, 1, 0, 3)
+                .reshape(k * bw * bs, -1)
+            )
+        else:
+            self.gates = None
+            self.depths = None
+            self.observations = None
 
         self.width = k * bw
         return self.bs, self.width, is_batch_unprepped
@@ -511,9 +519,10 @@ class InferWrapper:
         self.beam_width = 1
 
         self.model = model
-        # load model from file
-        saved_data = torch.load(file, map_location="cpu", weights_only=True)
-        self.model.load_state_dict(saved_data["model_state_dict"])
+        if file is not None:
+            # load model from file
+            saved_data = torch.load(file, map_location="cpu", weights_only=True)
+            self.model.load_state_dict(saved_data["model_state_dict"])
         self.model.eval()
 
         self._set_device()
@@ -537,7 +546,7 @@ class InferWrapper:
         gate_qubits: np.ndarray,
         targets: np.ndarray,
         beam_width: int = 1,
-    ) -> (list[Path], bool):
+    ) -> list[Path]:
         """
         High level function to run inference on a given problem for unpreparing state.
         Args:
@@ -548,6 +557,12 @@ class InferWrapper:
             gate_qubits: (np.ndarray) (bs, 2*g)
             targets: (np.ndarray) (bs, 2*n+n)
             beam_width: (int)
+
+        Returns:
+            output_paths: list[Path]
+                The length of the list is the same as the batch size. The width of an element
+                might be more than the beam width, owing to the expansion stage of the beam
+                search.
         """
         # Initialize variables
         batch_size = evals.shape[0]
@@ -581,15 +596,18 @@ class InferWrapper:
                     )
                 else:
                     gate_predictions = nn.Softmax(-1)(gate_prediction_logit)
-                    expansion_ratio = 4
+                    expansion_ratio = 4 if depth != self.max_depth else 1
                     _, top_gates = torch.topk(gate_predictions, expansion_ratio, dim=-1)
                     batch_size, width, unprepped_batches = curr_beam.update_states(
                         top_gates, output_paths, simulator
                     )
+                    print(
+                        f"Depth: {depth}, max depth: {self.max_depth}, Expansion ratio: {expansion_ratio} -> Width: {width}"
+                    )
                     simulator.remove_batch(unprepped_batches)
                     data.remove_batch(unprepped_batches)
                     # Break the loop after simulating the last set of gates.
-                    if depth == self.max_depth:
+                    if depth == self.max_depth or batch_size == 0:
                         break
 
                 ############
@@ -622,7 +640,8 @@ class InferWrapper:
                 )
                 gate_prediction_logit = gate_prediction_logit[top_indices, cols]
                 curr_beam.filter_beam(top_indices)
-                curr_beam.append_depth_tensor(depth_prediction)
+                if depth < self.max_depth + 1:
+                    curr_beam.append_depth_tensor(depth_prediction)
 
                 depth += 1
 
