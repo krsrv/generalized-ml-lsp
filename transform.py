@@ -1,6 +1,5 @@
 import os
 
-import h5py
 import numpy as np
 
 
@@ -62,14 +61,12 @@ if __name__ == "__main__":
     import time
 
     input_files = [
-        # "training-data/2-4_20000.npz",
-        "training-data/19-20_20000.npz",
-        # "training-data/11-14_20000.npz",
+        # List of input files, with .npz extension. Example:
+        # "training-data/2-5_20000.npz",
     ]
     output_files = [
-        # "training-data/compiled/2-4_20000",
-        "training-data/compiled/19-20_20000",
-        # "training-data/compiled/11-14_20000",
+        # List of output files, without .npz extension. Example:
+        # "training-data/compiled/2-5_20000"
     ]
     for input_file, output_file in zip(input_files, output_files):
         tic = time.time()
