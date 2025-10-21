@@ -23,8 +23,8 @@ def count_parameters(model):
     return sum(p.numel() for p in model.parameters())
 
 
-def elapsed_str(elapsed, curr_batch_idx, total_batches, epoch_idx):
-    avg_time = elapsed / (curr_batch_idx + 1) if curr_batch_idx > 0 else 0
+def elapsed_str(elapsed_bot, elapsed_bob, curr_batch_idx, total_batches, epoch_idx):
+    avg_time = elapsed_bot / (curr_batch_idx + 1) if curr_batch_idx > 0 else 0
     remaining_batches = total_batches - (curr_batch_idx + 1)
     est_remaining = avg_time * remaining_batches
     if est_remaining < 60:
@@ -33,7 +33,7 @@ def elapsed_str(elapsed, curr_batch_idx, total_batches, epoch_idx):
         est_str = f"{est_remaining/60:.2f} minutes"
     else:
         est_str = f"{est_remaining/3600:.2f} hours"
-    return f"Iterated over {curr_batch_idx} batchs, {epoch_idx} epochs ({elapsed} s)| Avg time: {avg_time:.7f} s/batch | Estimated time left for epoch: {est_str}"
+    return f"Iterated over {curr_batch_idx} batchs, {epoch_idx} epochs ({elapsed_bob} s)| Avg time: {avg_time:.7f} s/batch | Estimated time left for epoch: {est_str}"
 
 
 class Trainer:
@@ -113,8 +113,8 @@ class Trainer:
 
         num_batches = self.train_data.get_total_size() / self.train_data.batch_size
 
+        tic = time.time()
         for epoch in range(epochs):
-            tic = time.time()
             batch_tic = time.time()
             for i, train_data in enumerate(iter(self.train_data)):
                 n = train_data["eigval"].shape[1]
@@ -138,7 +138,11 @@ class Trainer:
                 train_depth_loss_history.append(depth_loss.detach().cpu().item())
 
                 if i % 1000 == 0:
-                    print(elapsed_str(time.time() - batch_tic, i, num_batches, epoch))
+                    print(
+                        elapsed_str(
+                            time.time() - tic, time.time() - batch_tic, i, num_batches, epoch
+                        )
+                    )
                     self.dump_loss_history(
                         training_loss_history,
                         train_gate_loss_history,
