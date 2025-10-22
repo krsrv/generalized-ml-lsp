@@ -1,5 +1,4 @@
 import ctypes
-import subprocess
 
 import numpy as np
 import torch
@@ -206,6 +205,7 @@ class Path:
         width: int = 1,
         bs: int = 64,
         unprepped: bool = False,
+        identifier: int = None,
     ):
         self.n = n
         self.observations = observations
@@ -214,6 +214,7 @@ class Path:
         self.width = width
         self.bs = bs
         self.unprepped = unprepped
+        self.identifier = identifier
 
     def __str__(self, layout=None, gate_set=None):
         st = f"Success: {self.is_successfully_unprepared()}"
@@ -289,6 +290,11 @@ class Path:
             self.gates = self.gates.reshape(self.width, bs, -1)
             self.gates = self.gates[top_indices, cols]
             self.gates = self.gates.reshape(k * bs, -1)
+        # Modify identifiers
+        if self.identifier is not None:
+            self.identifier = self.identifier.reshape(self.width, bs)
+            self.identifier = self.identifier[top_indices, cols]
+            self.identifier = self.identifier.reshape(k * bs, -1)
 
         self.width = k
 
@@ -313,6 +319,7 @@ class Path:
         self.observations = self.observations.reshape(self.width, self.bs, -1).transpose(0, 1)
         self.depths = self.depths.reshape(self.width, self.bs, -1).transpose(0, 1)
         self.gates = self.gates.reshape(self.width, self.bs, -1).transpose(0, 1)
+        self.identifier = self.identifier.reshape(self.width, self.bs).transpose(0, 1)
 
         for idx in range(self.observations.shape[0]):
             path_list.append(
@@ -324,11 +331,13 @@ class Path:
                     self.width,
                     1,
                     False,
+                    identifier=self.identifier[idx, 0].cpu(),
                 )
             )
         self.observations = None
         self.depths = None
         self.gates = None
+        self.identifier = None
 
     def update_states(
         self, new_gates: torch.Tensor, unprepped_states: list["Path"], simulator: BatchSimulator
@@ -379,6 +388,14 @@ class Path:
         # self.depths -> (k, bw, bs, depth)
 
         ###############
+        # Update identifiier
+        ###############
+        if self.identifier is not None:
+            self.identifier = self.identifier.reshape(bw, bs)
+            self.identifier = self.identifier.unsqueeze(0).expand(k, -1, -1).reshape(-1, bs)
+        # self.identifier -> (k, bw, bs)
+
+        ###############
         # Update observations
         ###############
         self.observations = self.observations.reshape(bw, bs, -1).permute(1, 0, 2)
@@ -407,6 +424,7 @@ class Path:
                     bw * k,
                     1,
                     True,
+                    self.identifier[0, idx].cpu(),
                 )
             )
         # Filter out unprepped states from current state variables
@@ -419,10 +437,14 @@ class Path:
                 .permute(2, 1, 0, 3)
                 .reshape(k * bw * bs, -1)
             )
+            self.identifier = (
+                self.identifier.transpose(0, 1)[~is_batch_unprepped].transpose(0, 1).reshape(-1)
+            )
         else:
             self.gates = None
             self.depths = None
             self.observations = None
+            self.identifier = None
 
         self.width = k * bw
         return self.bs, self.width, is_batch_unprepped
@@ -537,6 +559,47 @@ class InferWrapper:
     def _create_simulators(self, layouts: np.ndarray, gates: np.ndarray) -> BatchSimulator:
         return BatchSimulator(layouts, gates)
 
+    def get_model_prediction(
+        self,
+        evals: torch.Tensor,
+        evecs: torch.Tensor,
+        gates: torch.Tensor,
+        gate_qubits: torch.Tensor,
+        observations: torch.Tensor,
+    ):
+        """
+        Get model prediction for given inputs. Chunk into batches of `chunk_size` if the batch
+        size is too large.
+
+        Args:
+            evals: torch.Tensor, shape (width * bs, n)
+            evecs: torch.Tensor, shape (width * bs, n, n)
+            gates: torch.Tensor, shape (width * bs, g)
+            gate_qubits: torch.Tensor, shape (width * bs, 2*g)
+            observations: torch.Tensor, typically shape (width * bs, 2n+1)
+        Returns:
+            Output of the model's forward method.
+        """
+        # Chunk data for model into batches of size 1024. Process all of bs in chunks.
+        bs = evals.shape[0]
+        chunk_size = 1024
+        outputs = []
+        for start in range(0, bs, chunk_size):
+            end = min(start + chunk_size, bs)
+            evals_chunk = evals[start:end]
+            evecs_chunk = evecs[start:end]
+            gates_chunk = gates[start:end]
+            gate_qubits_chunk = gate_qubits[start:end]
+            observations_chunk = observations[start:end]
+            outputs.append(
+                self.model(
+                    evals_chunk, evecs_chunk, gates_chunk, gate_qubits_chunk, observations_chunk
+                )
+            )
+        if len(outputs) == 1:
+            return outputs[0]
+        return tuple(torch.cat([out[i] for out in outputs], dim=0) for i in range(len(outputs[0])))
+
     def infer_batch(
         self,
         layouts: np.ndarray,
@@ -593,6 +656,7 @@ class InferWrapper:
                         None,  # int32
                         width=1,
                         bs=batch_size,
+                        identifier=torch.arange(0, batch_size).to(self.device),
                     )
                 else:
                     gate_predictions = nn.Softmax(-1)(gate_prediction_logit)
@@ -600,9 +664,6 @@ class InferWrapper:
                     _, top_gates = torch.topk(gate_predictions, expansion_ratio, dim=-1)
                     batch_size, width, unprepped_batches = curr_beam.update_states(
                         top_gates, output_paths, simulator
-                    )
-                    print(
-                        f"Depth: {depth}, max depth: {self.max_depth}, Expansion ratio: {expansion_ratio} -> Width: {width}"
                     )
                     simulator.remove_batch(unprepped_batches)
                     data.remove_batch(unprepped_batches)
@@ -614,7 +675,7 @@ class InferWrapper:
                 # Calculate predicted cost
                 ############
                 evals, evecs, gates, gate_qubits = data.replicate(width)
-                gate_prediction_logit, depth_prediction = self.model.forward(
+                gate_prediction_logit, depth_prediction = self.get_model_prediction(
                     evals.to(self.device),  # (width * bs, n)
                     evecs.to(self.device),  # (width * bs, n, n)
                     gates.to(self.device),  # (width * bs, g)
