@@ -4,7 +4,14 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from inference.infer import InferWrapper, Path, format_observation, get_gate_literals, name_dict
+from inference.infer import (
+    InferWrapper,
+    Path,
+    format_observation,
+    get_gate_literals,
+    is_1_qubit_gate,
+    name_dict,
+)
 from models.model_v0 import ModelV0
 from training.dataset import UnprepNpzDataloader
 
@@ -62,6 +69,8 @@ def run_inference(
     depth_prediction = []  # Model's prediction of depth
     depth_inference = []  # Max depth that model tried for before termination
     actual_depth = []
+    has_2_qubit_gateset = []
+    has_2_qubit_gate_truth = []
 
     tic = time.time()
     for i, data in enumerate(iter(full_dataset)):
@@ -88,6 +97,11 @@ def run_inference(
                 depth_inference.append(max_depth + 1)
             depth_prediction.append(path.depths[0][0])
             unprepped_successfully.append(path.unprepped)
+            has_2_qubit_gate = torch.any(
+                torch.tensor([is_1_qubit_gate(gate) for gate in data["gate_oh"][path.identifier]])
+            )
+            has_2_qubit_gateset.append(has_2_qubit_gate)
+            has_2_qubit_gate_truth.append(is_1_qubit_gate(data["gate"][path.identifier]))
 
         actual_depth.append(data["depth"])
 
@@ -98,6 +112,9 @@ def run_inference(
                 depth_prediction=depth_prediction,
                 actual_depth=actual_depth,
                 unprepped_successfully=unprepped_successfully,
+                unprepped_optimally=unprepped_optimally,
+                has_2_qubit_gateset=has_2_qubit_gateset,
+                has_2_qubit_gate_truth=has_2_qubit_gate_truth,
             )
             print(
                 elapsed_str(
@@ -112,6 +129,8 @@ def run_inference(
     depth_inference = np.array(depth_inference)
     depth_prediction = np.array(depth_prediction)
     actual_depth = np.array(actual_depth)
+    has_2_qubit_gateset = np.array(has_2_qubit_gateset)
+    has_2_qubit_gate_truth = np.array(has_2_qubit_gate_truth)
 
     # print(f"Total datapoints: {full_dataset.get_total_size()}")
     # print(f"Number of correct inferences: {np.count_nonzero(unprepped_successfully)}")
@@ -138,6 +157,9 @@ def run_inference(
         depth_prediction=depth_prediction,
         actual_depth=actual_depth,
         unprepped_successfully=unprepped_successfully,
+        unprepped_optimally=unprepped_optimally,
+        has_2_qubit_gateset=has_2_qubit_gateset,
+        has_2_qubit_gate_truth=has_2_qubit_gate_truth,
     )
 
 
@@ -156,7 +178,10 @@ if __name__ == "__main__":
     args.model_file = (
         "output/full_run_2_10-epochs=20-lr=0.001-beta=(0.9, 0.999)-iter-7/model-18-33698.pt"
     )
-    args.dataset = "training-data/split/2-10-validation.npz"
+    args.model_file = (
+        "output/full_run_2_10-epochs=20-lr=0.001-beta=(0.9, 0.999)-iter-8/model-7-35357.pt"
+    )
+    args.dataset = "training-data/split/2-10-train.npz"
     parent_dir = os.path.dirname(args.model_file)
     args.output_file = os.path.join(
         parent_dir,
