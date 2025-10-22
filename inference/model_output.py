@@ -1,3 +1,5 @@
+import time
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -5,71 +7,95 @@ import torch.nn as nn
 from models.model_v0 import ModelV0
 from training.dataset import UnprepNpzDataloader
 
-device = "cuda"
 
-# Initialize and load the model
-model = ModelV0(
-    128,
-    32,
-    64,
-    32,
-    32,
-    hetero_attention_embed_dim=100,
-)
-model.to(device)
-saved_data = torch.load(
-    "output/full_run_2_10-epochs=20-lr=0.001-beta=(0.9, 0.999)-iter-6/model-19-10828.pt",
-    map_location=device,
-    weights_only=True,
-)
-model.load_state_dict(saved_data["model_state_dict"])
-model.eval()
+def elapsed_str(elapsed_bot, elapsed_bob, curr_batch_idx, total_batches):
+    avg_time = elapsed_bot / (curr_batch_idx + 1) if curr_batch_idx > 0 else 0
+    remaining_batches = total_batches - (curr_batch_idx + 1)
+    est_remaining = avg_time * remaining_batches
+    if est_remaining < 60:
+        est_str = f"{est_remaining:.2f} seconds"
+    elif est_remaining < 3600:
+        est_str = f"{est_remaining/60:.2f} minutes"
+    else:
+        est_str = f"{est_remaining/3600:.2f} hours"
+    return f"Iterated over {curr_batch_idx} epochs ({elapsed_bob} s)| Avg time: {avg_time:.7f} s/batch | Estimated time left for epoch: {est_str}"
 
-# # Check loss values for samples picked directly from the training set.
-# np.random.seed(4)
-full_dataset = UnprepNpzDataloader("training-data/split/2-10-validation.npz")
 
-n_data = torch.empty(0, dtype=torch.int)
-g_data = torch.empty(0, dtype=torch.int)
-true_depth_data = torch.empty(0, dtype=torch.int)
-depth_loss_data = torch.empty(0, dtype=torch.float)
-gate_loss_data = torch.empty(0, dtype=torch.float)
+def run_and_dump_output(model: nn.Module, dataset: UnprepNpzDataloader, output_file: str):
+    n_data = torch.empty(0, dtype=torch.int)
+    g_data = torch.empty(0, dtype=torch.int)
+    true_depth_data = torch.empty(0, dtype=torch.int)
+    depth_loss_data = torch.empty(0, dtype=torch.float)
+    gate_loss_data = torch.empty(0, dtype=torch.float)
 
-for i, data in enumerate(iter(full_dataset)):
-    with torch.no_grad():
-        gate_prediction, depth_prediction = model.forward(
-            torch.tensor(data["eigval"], dtype=torch.float, device=device),
-            torch.tensor(data["eigvec"], dtype=torch.float, device=device),
-            torch.tensor(data["gate_oh"], dtype=torch.long, device=device),
-            torch.tensor(data["gate_qubit_oh"], dtype=torch.long, device=device),
-            torch.tensor(data["observation"], dtype=torch.bool, device=device),
+    num_batches = dataset.get_total_size() / dataset.batch_size
+    device = next(model.parameters()).device
+    tic = batch_tic = time.time()
+    for i, data in enumerate(iter(dataset)):
+        with torch.no_grad():
+            gate_prediction, depth_prediction = model.forward(
+                torch.tensor(data["eigval"], dtype=torch.float, device=device),
+                torch.tensor(data["eigvec"], dtype=torch.float, device=device),
+                torch.tensor(data["gate_oh"], dtype=torch.long, device=device),
+                torch.tensor(data["gate_qubit_oh"], dtype=torch.long, device=device),
+                torch.tensor(data["observation"], dtype=torch.bool, device=device),
+            )
+        gate_loss = nn.CrossEntropyLoss(reduction="none")(
+            gate_prediction, torch.tensor(data["gate"], dtype=torch.int64, device=device)
         )
-    gate_loss = nn.CrossEntropyLoss()(
-        gate_prediction, torch.tensor(data["gate"], dtype=torch.int64, device=device)
-    ).to("cpu")
-    gate_loss_data = torch.concat((gate_loss_data, gate_loss.unsqueeze(0)))
+        gate_loss_data = torch.concat((gate_loss_data, gate_loss.to("cpu")))
 
-    n = data["layout"].shape[-1]
-    g = data["gate_oh"].shape[-1]
-    n_data = torch.concat((n_data, n * torch.ones(data["layout"].shape[0])))
-    g_data = torch.concat((g_data, g * torch.ones(data["layout"].shape[0])))
+        n = data["layout"].shape[-1]
+        g = data["gate_oh"].shape[-1]
+        n_data = torch.concat((n_data, n * torch.ones(data["layout"].shape[0])))
+        g_data = torch.concat((g_data, g * torch.ones(data["layout"].shape[0])))
 
-    true_depth = torch.tensor(data["depth"], dtype=torch.float, device=device)
-    depth_loss = nn.MSELoss(reduction="none")(
-        depth_prediction,
-        true_depth / 2 - 2.2,
-    ).to("cpu")
-    # print(depth_loss.shape)
-    depth_loss_data = torch.concat((depth_loss_data, depth_loss))
-    true_depth_data = torch.concat((true_depth_data, true_depth.to("cpu")))
+        true_depth = torch.tensor(data["depth"], dtype=torch.float, device=device)
+        depth_loss = nn.MSELoss(reduction="none")(
+            depth_prediction,
+            true_depth / 2 - 2.2,
+        ).to("cpu")
+        depth_loss_data = torch.concat((depth_loss_data, depth_loss))
+        true_depth_data = torch.concat((true_depth_data, true_depth.to("cpu")))
 
-torch.save(
-    {
-        "n_data": n_data,
-        "g_data": g_data,
-        "true_depth_data": true_depth_data,
-        "depth_loss_data": depth_loss_data,
-        "gate_loss_data": gate_loss_data,
-    },
-    "output/model_output_data.pt",
-)
+        if i % 500 == 0:
+            print(elapsed_str(time.time() - tic, time.time() - batch_tic, i, num_batches))
+            batch_tic = time.time()
+
+    print(f"Dumping to {output_file}")
+    torch.save(
+        {
+            "n_data": n_data,
+            "g_data": g_data,
+            "true_depth_data": true_depth_data,
+            "depth_loss_data": depth_loss_data,
+            "gate_loss_data": gate_loss_data,
+        },
+        output_file,
+    )
+
+
+if __name__ == "__main__":
+    import os
+
+    model = ModelV0(
+        128,
+        32,
+        64,
+        32,
+        32,
+        hetero_attention_embed_dim=100,
+    )
+    file = "output/full_run_2_10-epochs=20-lr=0.001-beta=(0.9, 0.999)-iter-8/model-7-35357.pt"
+    saved_data = torch.load(
+        "output/full_run_2_10-epochs=20-lr=0.001-beta=(0.9, 0.999)-iter-8/model-7-35357.pt",
+        weights_only=True,
+    )
+    model.load_state_dict(saved_data["model_state_dict"])
+    model.to("cuda")
+    model.eval()
+
+    # # Check loss values for samples picked directly from the training set.
+    # np.random.seed(4)
+    dataset = UnprepNpzDataloader("training-data/split/2-10-validation.npz")
+    run_and_dump_output(model, dataset, f"{os.path.dirname(file)}/model_output_data.pt")
