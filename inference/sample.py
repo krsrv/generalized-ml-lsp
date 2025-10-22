@@ -1,5 +1,6 @@
 import time
 
+import matplotlib.pyplot as plt
 import numpy as np
 import qiskit
 import torch
@@ -89,16 +90,9 @@ def run_inference_train(
         path = output_paths[0]
         path.gates = path.gates.numpy()
         gate_set = np.unique(data["gate_oh"][0])
-        print(f"Gate set: {gate_set}")
-        for i in range(7):
-            x = data["observation"][0][15 * i : 15 * (i + 1)].astype(int)
-            print(f"Observation: {', '.join(str(v) for v in x)}")
-        print(f"Gate: {data["gate"]}")
-        qcs = []
-        print(path.gates.shape)
+        qcs: list[qiskit.QuantumCircuit] = []
         for gates in path.gates:
             qcs.append(get_qiskit_circuit(n, data["layout"][0], gate_set, gates))
-            print(f"Proposed gates: {gates}")
 
         print(f"Datapoint #{i}:")
         print(f"Input state: {format_observation(data["observation"], n)}")
@@ -106,7 +100,11 @@ def run_inference_train(
         print("Unprepped successfully !!!!" if path.unprepped else "Unable to unprep :(")
         print(f"Proposed circuit:")
         for qc in qcs:
+            # fig = qc.draw(output="mpl")
+            # plt.show()
             print(qc)
+            print("--------------------------------------------------------------")
+
         # print(f"Gate debug:")
         # for gates in path.gates:
         #     print(f"{get_gate_literals(gates, data['layout'][0], gate_set)}")
@@ -129,11 +127,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
     print(f"Args: {args}")
 
-    seed = 1
-    np.random.seed(seed)
-    model_file = (
-        "output/full_run_2_10-epochs=20-lr=0.001-beta=(0.9, 0.999)-iter-7/model-18-33698.pt"
-    )
+    # seed = 10
+    # np.random.seed(seed)
+    model_file = "output/full_run_2_10-epochs=20-lr=0.001-beta=(0.9, 0.999)-iter-8/model-7-35357.pt"
     dummy_wrapper = InferWrapper(
         ModelV0(
             128,
@@ -147,7 +143,7 @@ if __name__ == "__main__":
         1,
     )
 
-    dataset = UnprepNpzDataloader("training-data/split/2-10-validation.npz", shuffle=False)
+    dataset = UnprepNpzDataloader("training-data/split/2-10-validation.npz", shuffle=True)
     dataset.set_batch_size(1)
 
     run_inference_train(dummy_wrapper.model, dataset, args.max_depth, args.beam_width)
