@@ -19,8 +19,8 @@ gen.manual_seed(seed)
 np.random.seed(seed % 2**32)
 
 
-def elapsed_str(elapsed, curr_batch_idx, total_batches):
-    avg_time = elapsed / (curr_batch_idx + 1) if curr_batch_idx > 0 else 0
+def elapsed_str(elapsed_bot, elapsed_bob, curr_batch_idx, total_batches):
+    avg_time = elapsed_bot / (curr_batch_idx + 1) if curr_batch_idx > 0 else 0
     remaining_batches = total_batches - (curr_batch_idx + 1)
     est_remaining = avg_time * remaining_batches
     if est_remaining < 60:
@@ -29,7 +29,7 @@ def elapsed_str(elapsed, curr_batch_idx, total_batches):
         est_str = f"{est_remaining/60:.2f} minutes"
     else:
         est_str = f"{est_remaining/3600:.2f} hours"
-    return f"Iterated over {curr_batch_idx} epochs ({elapsed} s)| Avg time: {avg_time:.7f} s/batch | Estimated time left for epoch: {est_str}"
+    return f"Iterated over {curr_batch_idx} epochs ({elapsed_bob} s)| Avg time: {avg_time:.7f} s/batch | Estimated time left for epoch: {est_str}"
 
 
 class Trainer:
@@ -100,7 +100,7 @@ class Trainer:
         training_loss_history = []
 
         train_data = next(iter(self.train_data))
-        tic = time.time()
+        tic = batch_tic = time.time()
         for epoch in range(epochs):
             self.optimizer.zero_grad()
             gate_prediction, depth_prediction = self.run_model(train_data)
@@ -122,8 +122,8 @@ class Trainer:
                 self.dump_loss_history(
                     training_loss_history, gate_loss_history, depth_loss_history
                 )
-                print(elapsed_str(time.time() - tic, epoch, epochs))
-                tic = time.time()
+                print(elapsed_str(time.time() - tic, time.time() - batch_tic, epoch, epochs))
+                batch_tic = time.time()
                 self.store_checkpoint(epoch, 0, None, None)
 
         # Also store at the end of the model
