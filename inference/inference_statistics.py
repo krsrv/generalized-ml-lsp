@@ -73,8 +73,8 @@ def run_inference(
     has_2_qubit_gate_truth = []
 
     tic = time.time()
-    for i, data in enumerate(iter(full_dataset)):
-        # print(f"Batch {i}: {data["layout"].shape[-1]}, {data["gate_oh"].shape[-1]}")
+    for batch_idx, data in enumerate(iter(full_dataset)):
+        print(f"Batch {batch_idx}: {data["layout"].shape[-1]}, {data["gate_oh"].shape[-1]}")
         # continue
         output_paths = wrapper.infer_batch(
             data["layout"],
@@ -105,7 +105,7 @@ def run_inference(
 
         actual_depth.append(data["depth"])
 
-        if i % 1000 == 0:
+        if batch_idx % 10 == 0:
             np.savez(
                 output_file,
                 depth_inference=depth_inference,
@@ -119,7 +119,7 @@ def run_inference(
             print(
                 elapsed_str(
                     time.time() - tic,
-                    i,
+                    batch_idx,
                     full_dataset.get_total_size() / full_dataset.batch_size,
                 )
             )
