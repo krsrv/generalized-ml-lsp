@@ -219,7 +219,8 @@ class Path:
         self.seen_sets = [set() for _ in range(bs)]
         if width == 1:
             for i in range(bs):
-                self.seen_sets[i].add(self.observations[i])
+                initial_hash = torch.hash_tensor(self.observations[i]).item()
+                self.seen_sets[i].add(initial_hash)
 
     def __str__(self, layout=None, gate_set=None):
         st = f"Success: {self.is_successfully_unprepared()}"
@@ -345,17 +346,33 @@ class Path:
         self.identifier = None
 
     def get_duplicate_tracker(self, observations: torch.Tensor) -> torch.Tensor:
-        # self.observations -> (bs, bw, k, 2n^2+n) (np.ndarray)
+        # self.observations -> (bs, bw, k, 2n^2+n)
         duplicate_tracker = torch.zeros(
             observations.shape[:3], dtype=torch.bool, device=observations.device
         )
-        for batch_idx, i1 in enumerate(observations):
-            for w, i2 in enumerate(i1):
-                for k, i3 in enumerate(i2):
-                    if any(torch.equal(i3, item) for item in self.seen_sets[batch_idx]):
-                        duplicate_tracker[batch_idx, w, k] = True
-                    else:
-                        self.seen_sets[batch_idx].add(i3)
+
+        hashed = torch.hash_tensor(observations, -1)  # (bs,bw, k)
+
+        for batch_idx in range(observations.shape[0]):
+            batch_hashes = hashed[batch_idx]
+            batch_hashes_flat = batch_hashes.flatten()
+            seen_hashes = self.seen_sets[batch_idx]
+            is_duplicate = torch.tensor(
+                [hash_val.item() in seen_hashes for hash_val in batch_hashes_flat],
+                dtype=torch.bool,
+                device=observations.device,
+            )
+
+            is_duplicate = is_duplicate.reshape(batch_hashes.shape)
+            duplicate_tracker[batch_idx] = is_duplicate
+
+            # Cast to int32 to avoid NotImplementedError for UInt64 index_cuda on CUDA
+            batch_hashes_flat = batch_hashes_flat.to(torch.int32)
+            is_duplicate_flat = is_duplicate.flatten()
+            new_hashes = batch_hashes_flat[~is_duplicate_flat]
+            for hash_val in new_hashes:
+                seen_hashes.add(hash_val.item())
+
         return duplicate_tracker
 
     def update_states(
@@ -726,6 +743,7 @@ class InferWrapper:
                 depth_prediction, top_indices = torch.topk(
                     -depth_prediction + duplication_cost, k, dim=0
                 )
+                depth_prediction = -depth_prediction
                 # top_indices: (beam_width, bs)
                 cols = (
                     torch.arange(batch_size, device=self.device)
