@@ -215,6 +215,11 @@ class Path:
         self.bs = bs
         self.unprepped = unprepped
         self.identifier = identifier
+        self.duplicate_tracker = None
+        self.seen_sets = [set() for _ in range(bs)]
+        if width == 1:
+            for i in range(bs):
+                self.seen_sets[i].add(self.observations[i])
 
     def __str__(self, layout=None, gate_set=None):
         st = f"Success: {self.is_successfully_unprepared()}"
@@ -339,6 +344,20 @@ class Path:
         self.gates = None
         self.identifier = None
 
+    def get_duplicate_tracker(self, observations: torch.Tensor) -> torch.Tensor:
+        # self.observations -> (bs, bw, k, 2n^2+n) (np.ndarray)
+        duplicate_tracker = torch.zeros(
+            observations.shape[:3], dtype=torch.bool, device=observations.device
+        )
+        for batch_idx, i1 in enumerate(observations):
+            for w, i2 in enumerate(i1):
+                for k, i3 in enumerate(i2):
+                    if any(torch.equal(i3, item) for item in self.seen_sets[batch_idx]):
+                        duplicate_tracker[batch_idx, w, k] = True
+                    else:
+                        self.seen_sets[batch_idx].add(i3)
+        return duplicate_tracker
+
     def update_states(
         self, new_gates: torch.Tensor, unprepped_states: list["Path"], simulator: BatchSimulator
     ) -> (int, int, np.ndarray[bool]):
@@ -404,7 +423,10 @@ class Path:
             self.observations.cpu().numpy(),
             gates[:, :, :, -1].cpu().numpy(),
         )
-        # self.observations -> (bs, bw, k, 2n^2+n) (np.ndarray)
+        self.observations = torch.tensor(self.observations, device=self.gates.device)
+        self.duplicate_tracker = self.get_duplicate_tracker(self.observations)
+        # self.observations -> (bs, bw, k, 2n^2+n)
+        # self.duplicate_tracker  -> (bs, bw, k)
         # is_unprepped -> (bs, bw, k)
 
         ###############
@@ -418,7 +440,10 @@ class Path:
             unprepped_states.append(
                 Path(
                     self.n,
-                    self.observations[idx].transpose(1, 0, 2).reshape(bw * k, -1),  # np.ndarray
+                    self.observations[idx]
+                    .transpose(0, 1)
+                    .reshape(bw * k, -1)
+                    .cpu(),  # torch.tensor
                     self.depths[idx].transpose(0, 1).reshape(bw * k, -1).cpu(),  # torch.tensor
                     self.gates[idx].transpose(0, 1).reshape(bw * k, -1).cpu(),  # torch.tensor
                     bw * k,
@@ -433,18 +458,20 @@ class Path:
             self.gates = self.gates[~is_batch_unprepped].transpose(0, 2).reshape(k * bw * bs, -1)
             self.depths = self.depths[~is_batch_unprepped].transpose(0, 2).reshape(k * bw * bs, -1)
             self.observations = (
-                torch.tensor(self.observations[~is_batch_unprepped], device=self.gates.device)
-                .permute(2, 1, 0, 3)
-                .reshape(k * bw * bs, -1)
+                self.observations[~is_batch_unprepped].permute(2, 1, 0, 3).reshape(k * bw * bs, -1)
             )
             self.identifier = (
                 self.identifier.transpose(0, 1)[~is_batch_unprepped].transpose(0, 1).reshape(-1)
+            )
+            self.duplicate_tracker = (
+                self.duplicate_tracker[~is_batch_unprepped].permute(2, 1, 0).reshape(-1)
             )
         else:
             self.gates = None
             self.depths = None
             self.observations = None
             self.identifier = None
+            self.duplicate_tracker = None
 
         self.width = k * bw
         return self.bs, self.width, is_batch_unprepped
@@ -687,8 +714,18 @@ class InferWrapper:
                 # Truncate
                 ############
                 depth_prediction = depth_prediction.reshape(width, batch_size)
+                duplication_cost = torch.zeros_like(depth_prediction)
+                if curr_beam.duplicate_tracker is not None:
+                    duplication_cost = torch.nan_to_num(
+                        curr_beam.duplicate_tracker.reshape(width, batch_size).to(torch.float32)
+                        * -torch.inf,
+                        nan=0.0,
+                    )
                 k = np.minimum(beam_width, width)
-                depth_prediction, top_indices = torch.topk(depth_prediction, k, dim=0)
+                # Filter predictions corresponding to no duplicates and lowest depth predictions
+                depth_prediction, top_indices = torch.topk(
+                    -depth_prediction + duplication_cost, k, dim=0
+                )
                 # top_indices: (beam_width, bs)
                 cols = (
                     torch.arange(batch_size, device=self.device)
