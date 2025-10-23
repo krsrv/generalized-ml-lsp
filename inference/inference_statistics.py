@@ -25,8 +25,8 @@ Gate set:
 """
 
 
-def elapsed_str(elapsed, curr_batch_idx, total_batches):
-    avg_time = elapsed / (curr_batch_idx + 1) if curr_batch_idx > 0 else 0
+def elapsed_str(elapsed_bot, elapsed_bob, curr_batch_idx, total_batches):
+    avg_time = elapsed_bot / (curr_batch_idx + 1) if curr_batch_idx > 0 else 0
     remaining_batches = total_batches - (curr_batch_idx + 1)
     est_remaining = avg_time * remaining_batches
     if est_remaining < 60:
@@ -35,7 +35,7 @@ def elapsed_str(elapsed, curr_batch_idx, total_batches):
         est_str = f"{est_remaining/60:.2f} minutes"
     else:
         est_str = f"{est_remaining/3600:.2f} hours"
-    return f"Iterated over {curr_batch_idx} batches ({elapsed} s)| Avg time: {avg_time:.7f} s/batch | Estimated time left for epoch: {est_str}"
+    return f"Iterated over {curr_batch_idx} batches ({elapsed_bob} s)| Avg time: {avg_time:.7f} s/batch | Estimated time left for epoch: {est_str}"
 
 
 def run_inference(
@@ -64,15 +64,15 @@ def run_inference(
 
     full_dataset.set_batch_size(batch_size)
 
-    unprepped_successfully = []  # Unprepped correctly
-    unprepped_optimally = []  # Unprepped in the correct number of gates
-    depth_prediction = []  # Model's prediction of depth
-    depth_inference = []  # Max depth that model tried for before termination
-    actual_depth = []
-    has_2_qubit_gateset = []
-    has_2_qubit_gate_truth = []
+    unprepped_successfully = np.array([])  # Unprepped correctly
+    unprepped_optimally = np.array([])  # Unprepped in the correct number of gates
+    depth_prediction = np.array([])  # Model's prediction of depth
+    depth_inference = np.array([])  # Max depth that model tried for before termination
+    actual_depth = np.array([])
+    has_2_qubit_gateset = np.array([])
+    has_2_qubit_gate_truth = np.array([])
 
-    tic = time.time()
+    tic = batch_tic = time.time()
     for batch_idx, data in enumerate(iter(full_dataset)):
         # print(f"Batch {batch_idx}: {data["layout"].shape[-1]}, {data["gate_oh"].shape[-1]}")
         # continue
@@ -91,29 +91,32 @@ def run_inference(
             width_, inferred_depth = path.gates.shape
             if path.unprepped:
                 # All paths are guaranteed to be of same depth
-                if data["depth"][i] == inferred_depth:
-                    unprepped_optimally.append(True)
-                depth_inference.append(inferred_depth)
+                depth_inference = np.append(depth_inference, inferred_depth)
             else:
-                depth_inference.append(max_depth + 1)
-            depth_prediction.append(path.depths[0][0])
-            unprepped_successfully.append(path.unprepped)
+                depth_inference = np.append(depth_inference, max_depth + 1)
+            depth_prediction = np.append(depth_prediction, path.depths[0][0])
+            unprepped_successfully = np.append(unprepped_successfully, path.unprepped)
+            unprepped_optimally = np.append(unprepped_optimally, data["depth"][i] == inferred_depth)
             has_2_qubit_gate = torch.any(
                 torch.tensor([is_1_qubit_gate(gate) for gate in data["gate_oh"][path.identifier]])
             )
-            has_2_qubit_gateset.append(has_2_qubit_gate)
-            has_2_qubit_gate_truth.append(is_1_qubit_gate(data["gate"][path.identifier]))
+            has_2_qubit_gateset = np.append(has_2_qubit_gateset, has_2_qubit_gate)
+            has_2_qubit_gate_truth = np.append(
+                has_2_qubit_gate_truth, is_1_qubit_gate(data["gate"][path.identifier])
+            )
 
-        actual_depth.append(data["depth"])
+        actual_depth = np.append(actual_depth, data["depth"])
 
         if batch_idx % 500 == 0:
             print(
                 elapsed_str(
                     time.time() - tic,
+                    time.time() - batch_tic,
                     batch_idx,
                     full_dataset.get_total_size() / full_dataset.batch_size,
                 )
             )
+            batch_tic = time.time()
         if batch_idx % 1000 == 0:
             np.savez(
                 output_file,
@@ -124,15 +127,8 @@ def run_inference(
                 unprepped_optimally=unprepped_optimally,
                 has_2_qubit_gateset=has_2_qubit_gateset,
                 has_2_qubit_gate_truth=has_2_qubit_gate_truth,
+                seed=seed,
             )
-
-    unprepped_successfully = np.array(unprepped_successfully)
-    unprepped_optimally = np.array(unprepped_optimally)
-    depth_inference = np.array(depth_inference)
-    depth_prediction = np.array(depth_prediction)
-    actual_depth = np.array(actual_depth)
-    has_2_qubit_gateset = np.array(has_2_qubit_gateset)
-    has_2_qubit_gate_truth = np.array(has_2_qubit_gate_truth)
 
     # print(f"Total datapoints: {full_dataset.get_total_size()}")
     # print(f"Number of correct inferences: {np.count_nonzero(unprepped_successfully)}")
@@ -162,6 +158,7 @@ def run_inference(
         unprepped_optimally=unprepped_optimally,
         has_2_qubit_gateset=has_2_qubit_gateset,
         has_2_qubit_gate_truth=has_2_qubit_gate_truth,
+        seed=seed,
     )
 
 
@@ -187,10 +184,11 @@ if __name__ == "__main__":
     parent_dir = os.path.dirname(args.model_file)
     args.output_file = os.path.join(
         parent_dir,
-        f"parallel-inference-bw-{args.beam_width}-md-{args.max_depth}-bs-{args.batch_size}.npz",
+        f"parallel-inference-bw-{args.beam_width}-md-{args.max_depth}-bs-{args.batch_size}-no-duplicate.npz",
     )
     print(f"Output file: {args.output_file}")
 
+    global seed
     seed = 1
     np.random.seed(seed)
     run_inference(
