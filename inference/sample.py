@@ -99,10 +99,11 @@ def run_inference_train(
         print(f"Allowed gates: {[name_dict[gate] for gate in gate_set]}")
         print("Unprepped successfully !!!!" if path.unprepped else "Unable to unprep :(")
         print(f"Proposed circuit:")
-        for qc in qcs:
+        for i, qc in enumerate(qcs):
             # fig = qc.draw(output="mpl")
             # plt.show()
             print(qc)
+            print(path.gates[i])
             print("--------------------------------------------------------------")
 
         # print(f"Gate debug:")
@@ -112,7 +113,9 @@ def run_inference_train(
             f"True gate: {get_gate_literals(data["gate"], data["layout"][0], gate_set)[0]}, {data["gate"][0]}"
         )
         depth_prediction = (path.depths[0][0] + 2.2) * 2
-        print(f"Depth: {depth_prediction} (predicted) vs {data["depth"][0]} (actual)")
+        print(
+            f"Depth: {depth_prediction} (predicted) vs {len(path.gates[0])} (inferred) vs {data["depth"][0]} (actual)"
+        )
         print("\n\n\n")
 
         # Print gate losses over inference train
@@ -127,8 +130,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
     print(f"Args: {args}")
 
-    # seed = 10
-    # np.random.seed(seed)
+    seed = 10
+    np.random.seed(seed)
     model_file = "output/full_run_2_10-epochs=20-lr=0.001-beta=(0.9, 0.999)-iter-8/model-7-35357.pt"
     dummy_wrapper = InferWrapper(
         ModelV0(
