@@ -74,7 +74,7 @@ def run_inference(
 
     tic = time.time()
     for batch_idx, data in enumerate(iter(full_dataset)):
-        print(f"Batch {batch_idx}: {data["layout"].shape[-1]}, {data["gate_oh"].shape[-1]}")
+        # print(f"Batch {batch_idx}: {data["layout"].shape[-1]}, {data["gate_oh"].shape[-1]}")
         # continue
         output_paths = wrapper.infer_batch(
             data["layout"],
@@ -88,11 +88,12 @@ def run_inference(
         for i, path in enumerate(output_paths):
             # print("Depth shape", path.depths.shape)
             # print("Gate shape", path.gates.shape)
+            width_, inferred_depth = path.gates.shape
             if path.unprepped:
                 # All paths are guaranteed to be of same depth
-                if data["depth"][i] == len(path.gates):
+                if data["depth"][i] == inferred_depth:
                     unprepped_optimally.append(True)
-                depth_inference.append(len(path.gates))
+                depth_inference.append(inferred_depth)
             else:
                 depth_inference.append(max_depth + 1)
             depth_prediction.append(path.depths[0][0])
@@ -105,7 +106,15 @@ def run_inference(
 
         actual_depth.append(data["depth"])
 
-        if batch_idx % 10 == 0:
+        if batch_idx % 500 == 0:
+            print(
+                elapsed_str(
+                    time.time() - tic,
+                    batch_idx,
+                    full_dataset.get_total_size() / full_dataset.batch_size,
+                )
+            )
+        if batch_idx % 1000 == 0:
             np.savez(
                 output_file,
                 depth_inference=depth_inference,
@@ -115,13 +124,6 @@ def run_inference(
                 unprepped_optimally=unprepped_optimally,
                 has_2_qubit_gateset=has_2_qubit_gateset,
                 has_2_qubit_gate_truth=has_2_qubit_gate_truth,
-            )
-            print(
-                elapsed_str(
-                    time.time() - tic,
-                    batch_idx,
-                    full_dataset.get_total_size() / full_dataset.batch_size,
-                )
             )
 
     unprepped_successfully = np.array(unprepped_successfully)
@@ -181,7 +183,7 @@ if __name__ == "__main__":
     args.model_file = (
         "output/full_run_2_10-epochs=20-lr=0.001-beta=(0.9, 0.999)-iter-8/model-7-35357.pt"
     )
-    args.dataset = "training-data/split/2-10-train.npz"
+    args.dataset = "training-data/split/2-10-validation.npz"
     parent_dir = os.path.dirname(args.model_file)
     args.output_file = os.path.join(
         parent_dir,
