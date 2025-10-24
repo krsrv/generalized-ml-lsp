@@ -170,12 +170,6 @@ class BatchSimulator:
                     k,  # num_applied_gates
                     gates[i, j].ctypes.data_as(ctypes.POINTER(ctypes.c_int)),  # gates
                 )
-                print(
-                    "Simulation gates",
-                    gates[i, j],
-                    " for state ",
-                    format_observation(states[i, j], n),
-                )
                 # Access the array
                 if not sim_result.stabilizers:
                     raise MemoryError("C function failed to allocate memory")
