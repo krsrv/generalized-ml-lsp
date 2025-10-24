@@ -150,11 +150,12 @@ class BatchSimulator:
 
         n = self.layouts.shape[-1]
         k = gates.shape[-1]
-        gates = gates.astype(np.int32)
-        new_state = np.zeros(states.shape[:2] + (k,) + states.shape[2:], dtype=states.dtype)
-        is_unprepped = np.zeros(states.shape[:2] + (k,), dtype=np.bool_)
-        for i in range(states.shape[0]):
-            for j in range(states.shape[1]):
+        gates = gates.astype(np.int32)  # Needed for ctypes
+        bs, bw, ts = states.shape
+        new_state = np.zeros((bs, bw, k, ts), dtype=states.dtype)
+        is_unprepped = np.zeros((bs, bw, k), dtype=np.bool_)
+        for i in range(bs):
+            for j in range(bw):
                 layout = self.layouts[i].reshape(-1).ctypes.data_as(ctypes.POINTER(ctypes.c_bool))
                 gate_set = np.ascontiguousarray(self.gate_set[i]).ctypes.data_as(
                     ctypes.POINTER(ctypes.c_int)
@@ -163,17 +164,23 @@ class BatchSimulator:
                 sim_result = self.lib.run_simulator(
                     n,
                     layout,
-                    len(self.gate_set[i, :]),
-                    gate_set,
-                    state,
-                    k,
-                    gates[i, j].ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
+                    len(self.gate_set[i, :]),  # num_gate_types
+                    gate_set,  # gate_set
+                    state,  # tableau_arr
+                    k,  # num_applied_gates
+                    gates[i, j].ctypes.data_as(ctypes.POINTER(ctypes.c_int)),  # gates
+                )
+                print(
+                    "Simulation gates",
+                    gates[i, j],
+                    " for state ",
+                    format_observation(states[i, j], n),
                 )
                 # Access the array
                 if not sim_result.stabilizers:
                     raise MemoryError("C function failed to allocate memory")
                 new_state[i, j] = np.ctypeslib.as_array(
-                    sim_result.stabilizers, shape=(k * (n * n * 2 + n),)
+                    sim_result.stabilizers, shape=(k * ts,)
                 ).reshape(k, -1)
                 is_unprepped[i, j] = np.ctypeslib.as_array(sim_result.is_unprepped, shape=(k,))
                 self.lib.free_stabilizers_struct(sim_result)
@@ -249,8 +256,8 @@ class Path:
         helper function. In batch inference, the simulator module already computes this function
         using the ctypes library.
         """
-        observations = self.observations.reshape(self.width, self.bs, -1)
-        observations = observations.transpose(0, 1).reshape(self.width * self.bs, self.n, -1)
+        observations = self.observations.reshape(self.bs, self.width, -1)
+        observations = observations.reshape(self.width * self.bs, self.n, -1)
 
         def is_ground_state(subtensor: torch.Tensor):
             return (
@@ -262,11 +269,8 @@ class Path:
             )
 
         # There is no torch.apply or torch.map for tensors, so we use a list comprehension
-        return (
-            torch.stack([is_ground_state(obs) for obs in observations])
-            .reshape(self.bs, self.width)
-            .transpose(0, 1)
-            .reshape(-1)
+        return torch.stack([is_ground_state(obs) for obs in observations]).reshape(
+            self.bs, self.width
         )
 
     def filter_beam(self, top_indices: torch.Tensor):
@@ -274,45 +278,41 @@ class Path:
         Truncate beam to keep top `k` elements for each batch. The corresponding indices
         are tracked by the tensor `top_indices`
         """
-        k, bs = top_indices.shape
+        bs, k = top_indices.shape
+        # Modify identifiers
+        if self.identifier is not None:
+            self.identifier = self.identifier.reshape(bs, self.width)
+            self.identifier = self.identifier.gather(1, top_indices)
+            self.identifier = self.identifier.reshape(k * bs)
+        top_indices = top_indices.unsqueeze(-1)
         # Modify observations
-        self.observations = self.observations.reshape(self.width, bs, -1)
-        cols = (
-            torch.arange(bs, device=self.observations.device)
-            .unsqueeze(0)
-            .expand_as(top_indices)
+        self.observations = self.observations.reshape(bs, self.width, -1)
+        self.observations = self.observations.gather(
+            1, top_indices.expand(-1, -1, self.observations.shape[-1])
         )
-        self.observations = self.observations[top_indices, cols]
         self.observations = self.observations.reshape(k * bs, -1)
         # Modify depths
         if self.depths is not None:
-            cols.to(self.depths.device)
-            self.depths = self.depths.reshape(self.width, bs, -1)
-            self.depths = self.depths[top_indices, cols]
+            self.depths = self.depths.reshape(bs, self.width, -1)
+            self.depths = self.depths.gather(1, top_indices.expand(-1, -1, self.depths.shape[-1]))
             self.depths = self.depths.reshape(k * bs, -1)
         # Modify gates
         if self.gates is not None:
-            cols.to(self.gates.device)
-            self.gates = self.gates.reshape(self.width, bs, -1)
-            self.gates = self.gates[top_indices, cols]
+            self.gates = self.gates.reshape(bs, self.width, -1)
+            self.gates = self.gates.gather(1, top_indices.expand(-1, -1, self.gates.shape[-1]))
             self.gates = self.gates.reshape(k * bs, -1)
-        # Modify identifiers
-        if self.identifier is not None:
-            self.identifier = self.identifier.reshape(self.width, bs)
-            self.identifier = self.identifier[top_indices, cols]
-            self.identifier = self.identifier.reshape(k * bs, -1)
 
         self.width = k
 
     def append_depth_tensor(self, depths: torch.Tensor):
         """
-        depths: (width, bs)
+        depths: (bs, width)
         self.depths: (width * bs, depth)
         """
         if self.depths is None:
             self.depths = depths.reshape(-1).unsqueeze(-1)
         else:
-            self.depths = self.depths.reshape(self.width, self.bs, -1)
+            self.depths = self.depths.reshape(self.bs, self.width, -1)
             self.depths = torch.concat((self.depths, depths.unsqueeze(-1)), dim=-1)
             self.depths = self.depths.reshape(self.width * self.bs, -1)
 
@@ -406,42 +406,40 @@ class Path:
         ###############
         # Add new gates
         ###############
-        bw, bs, k = new_gates.shape
+        bs, bw, k = new_gates.shape
         assert self.bs == bs, f"Batch size mismatch: self.bs={self.bs}, bs={bs}"
-        new_gates = new_gates.transpose(1, 2).transpose(0, 1).unsqueeze(-1)
+        new_gates = new_gates.unsqueeze(-1)
         if self.gates is None:
             self.gates = new_gates
         else:
-            self.gates = self.gates.reshape(bw, bs, -1).unsqueeze(0).expand(k, -1, -1, -1)
+            self.gates = self.gates.reshape(bs, bw, -1).unsqueeze(2).expand(-1, -1, k, -1)
             self.gates = torch.concat((self.gates, new_gates), dim=-1)
-        # self.gates -> (k, bw, bs, depth)
+        # self.gates -> (bs, bw, k, depth+1)
 
         ###############
         # Update depths
         ###############
-        self.depths = self.depths.reshape(bw, bs, -1)
-        self.depths = self.depths.unsqueeze(0).expand(k, -1, -1, -1)
-        # self.depths -> (k, bw, bs, depth)
+        self.depths = self.depths.reshape(bs, bw, -1)
+        self.depths = self.depths.unsqueeze(2).expand(-1, -1, k, -1)
+        # self.depths -> (bs, bw, k, depth+1)
 
         ###############
         # Update identifiier
         ###############
         if self.identifier is not None:
-            self.identifier = self.identifier.reshape(bw, bs)
-            self.identifier = self.identifier.unsqueeze(0).expand(k, -1, -1).reshape(-1, bs)
-        # self.identifier -> (k, bw, bs)
+            self.identifier = self.identifier.reshape(bs, bw)
+            self.identifier = self.identifier.unsqueeze(-1).expand(-1, -1, k)
+        # self.identifier -> (bs, bw, k)
 
         ###############
         # Update observations
         ###############
-        self.observations = self.observations.reshape(bw, bs, -1).permute(1, 0, 2)
-        gates = self.gates.reshape(k, bw, bs, -1).permute(2, 1, 0, 3)
+        self.observations = self.observations.reshape(bs, bw, -1)
         self.observations, is_unprepped = simulator.run_simulation(
             self.observations.cpu().numpy(),
-            gates[:, :, :, -1].cpu().numpy(),
+            self.gates[:, :, :, -1].cpu().numpy(),
         )
         self.observations = torch.tensor(self.observations, device=self.gates.device)
-        self.duplicate_tracker = self.get_duplicate_tracker(self.observations)
         # self.observations -> (bs, bw, k, 2n^2+n)
         # self.duplicate_tracker  -> (bs, bw, k)
         # is_unprepped -> (bs, bw, k)
@@ -450,45 +448,32 @@ class Path:
         # Remove unprepped states
         ###############
         is_batch_unprepped = np.any(is_unprepped, axis=(-1, -2))
-        self.gates = self.gates.transpose(0, 2)
-        self.depths = self.depths.transpose(0, 2)
         # Add unprepped states to `unprepped_states`
         for idx in np.nonzero(is_batch_unprepped)[0]:
             unprepped_states.append(
                 Path(
                     self.n,
-                    self.observations[idx]
-                    .transpose(0, 1)
-                    .reshape(bw * k, -1)
-                    .cpu(),  # torch.tensor
-                    self.depths[idx].transpose(0, 1).reshape(bw * k, -1).cpu(),  # torch.tensor
-                    self.gates[idx].transpose(0, 1).reshape(bw * k, -1).cpu(),  # torch.tensor
+                    self.observations[idx].reshape(bw * k, -1).cpu(),  # torch.tensor
+                    self.depths[idx].reshape(bw * k, -1).cpu(),  # torch.tensor
+                    self.gates[idx].reshape(bw * k, -1).cpu(),  # torch.tensor
                     bw * k,
                     1,
                     True,
-                    self.identifier[0, idx].cpu(),
+                    self.identifier[idx, 0, 0].cpu(),
                 )
             )
         # Filter out unprepped states from current state variables
         self.bs = bs = self.bs - np.count_nonzero(is_batch_unprepped)
         if self.bs != 0:
-            self.gates = self.gates[~is_batch_unprepped].transpose(0, 2).reshape(k * bw * bs, -1)
+            self.gates = self.gates[~is_batch_unprepped].reshape(k * bw * bs, -1)
             self.depths = self.depths[~is_batch_unprepped].transpose(0, 2).reshape(k * bw * bs, -1)
-            self.observations = (
-                self.observations[~is_batch_unprepped].permute(2, 1, 0, 3).reshape(k * bw * bs, -1)
-            )
-            self.identifier = (
-                self.identifier.transpose(0, 1)[~is_batch_unprepped].transpose(0, 1).reshape(-1)
-            )
-            self.duplicate_tracker = (
-                self.duplicate_tracker[~is_batch_unprepped].permute(2, 1, 0).reshape(-1)
-            )
+            self.observations = self.observations[~is_batch_unprepped].reshape(k * bw * bs, -1)
+            self.identifier = self.identifier[~is_batch_unprepped].reshape(-1)
         else:
             self.gates = None
             self.depths = None
             self.observations = None
             self.identifier = None
-            self.duplicate_tracker = None
 
         self.width = k * bw
         return self.bs, self.width, is_batch_unprepped
@@ -554,21 +539,13 @@ class DataHolder:
     def replicate(
         self, rep
     ) -> (torch.tensor, torch.tensor, torch.tensor, torch.tensor):
-        evals = (
-            torch.unsqueeze(self.evals, dim=0).expand(rep, -1, -1).reshape(-1, self.n)
-        )
+        evals = torch.unsqueeze(self.evals, dim=1).expand(-1, rep, -1).reshape(-1, self.n)
         evecs = (
-            torch.unsqueeze(self.evecs, dim=0)
-            .expand(rep, -1, -1, -1)
-            .reshape(-1, self.n, self.n)
+            torch.unsqueeze(self.evecs, dim=1).expand(-1, rep, -1, -1).reshape(-1, self.n, self.n)
         )
-        gates = (
-            torch.unsqueeze(self.gates, dim=0).expand(rep, -1, -1).reshape(-1, self.g)
-        )
+        gates = torch.unsqueeze(self.gates, dim=1).expand(-1, rep, -1).reshape(-1, self.g)
         gate_qubits = (
-            torch.unsqueeze(self.gate_qubits, dim=0)
-            .expand(rep, -1, -1)
-            .reshape(-1, 2 * self.g)
+            torch.unsqueeze(self.gate_qubits, dim=1).expand(-1, rep, -1).reshape(-1, 2 * self.g)
         )
         return evals, evecs, gates, gate_qubits
 
@@ -730,31 +707,16 @@ class InferWrapper:
                 ############
                 # Truncate
                 ############
-                depth_prediction = depth_prediction.reshape(width, batch_size)
-                duplication_cost = torch.zeros_like(depth_prediction)
-                if curr_beam.duplicate_tracker is not None:
-                    duplication_cost = torch.nan_to_num(
-                        curr_beam.duplicate_tracker.reshape(width, batch_size).to(torch.float32)
-                        * -torch.inf,
-                        nan=0.0,
-                    )
+                depth_prediction = depth_prediction.reshape(batch_size, width)
                 k = np.minimum(beam_width, width)
                 # Filter predictions corresponding to no duplicates and lowest depth predictions
-                depth_prediction, top_indices = torch.topk(
-                    -depth_prediction + duplication_cost, k, dim=0
-                )
-                depth_prediction = -depth_prediction
-                # top_indices: (beam_width, bs)
-                cols = (
-                    torch.arange(batch_size, device=self.device)
-                    .unsqueeze(0)
-                    .expand_as(top_indices)
-                )  # (beam_width, bs)
+                depth_prediction, top_indices = torch.topk(-depth_prediction, k, dim=1)
+                depth_prediction = -depth_prediction  # (bs, k)
                 # Filter other variables
-                gate_prediction_logit = gate_prediction_logit.reshape(
-                    width, batch_size, -1
+                gate_prediction_logit = gate_prediction_logit.reshape(batch_size, width, -1)
+                gate_prediction_logit = gate_prediction_logit.gather(
+                    1, top_indices.unsqueeze(-1).expand(-1, -1, gate_prediction_logit.shape[-1])
                 )
-                gate_prediction_logit = gate_prediction_logit[top_indices, cols]
                 curr_beam.filter_beam(top_indices)
                 if depth < self.max_depth + 1:
                     curr_beam.append_depth_tensor(depth_prediction)
