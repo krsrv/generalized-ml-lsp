@@ -79,7 +79,7 @@ class ModelV0(nn.Module):
         )
         self.gate_projection_layer = GateProjectionLayer(self.embedding_dims)
         self.depth_projection_layer = DepthProjectionLayer(self.embedding_dims)
-        self.residual_layer = ResidualLayer()
+        self.residual_layer = ResidualLayer(norm=True, token_dim=self.embedding_dims)
 
     def forward(
         self,

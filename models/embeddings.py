@@ -202,19 +202,35 @@ class GateProjectionLayer(nn.Module):
 
 
 class ResidualLayer(nn.Module):
-    def __init__(self, alpha: float = 0.20) -> None:
+
+    def __init__(
+        self, alpha: float = 0.20, norm: bool = False, token_dim: TokenProperties = None
+    ) -> None:
         super().__init__()
         self.alpha = alpha
+        self.normalize = norm
+        if self.normalize:
+            self.nA = nn.LayerNorm(token_dim.dA, elementwise_affine=False)
+            self.nB = nn.LayerNorm(token_dim.dB, elementwise_affine=False)
+            self.nC = nn.LayerNorm(token_dim.dC, elementwise_affine=False)
+            self.nD = nn.LayerNorm(token_dim.dD, elementwise_affine=False)
+            self.nE = nn.LayerNorm(token_dim.dE, elementwise_affine=False)
+        else:
+            self.nA = nn.Identity()
+            self.nB = nn.Identity()
+            self.nC = nn.Identity()
+            self.nD = nn.Identity()
+            self.nE = nn.Identity()
 
     def forward(self, x: Tensor | Tokens, f_x: Tensor | Tokens) -> Tensor | Tokens:
         assert type(x) == type(f_x), "Either both inputs should be Tensors or Tokens"
         if isinstance(x, Tokens) and isinstance(f_x, Tokens):
             return Tokens(
-                x.A + self.alpha * f_x.A,
-                x.B + self.alpha * f_x.B,
-                x.C + self.alpha * f_x.C,
-                x.D + self.alpha * f_x.D,
-                x.E + self.alpha * f_x.E,
+                self.nA(x.A + self.alpha * f_x.A),
+                self.nB(x.B + self.alpha * f_x.B),
+                self.nC(x.C + self.alpha * f_x.C),
+                self.nD(x.D + self.alpha * f_x.D),
+                self.nE(x.E + self.alpha * f_x.E),
             )
         else:
             return x + self.alpha * f_x

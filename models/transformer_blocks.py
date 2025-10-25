@@ -4,7 +4,7 @@ import torch.nn as nn
 from torch import Tensor
 
 from .embeddings import ResidualLayer
-from .tokens import Tokens, TokenProperties
+from .tokens import TokenProperties, Tokens
 
 
 class HomogenousAttentionBlock(nn.Module):
@@ -14,10 +14,10 @@ class HomogenousAttentionBlock(nn.Module):
         # output dimension after the Q, K, V projections. There is no separate embedding_dim parameter
         # required as in the Heterogenous attention case. However, there are other parameters to tune:
         # size of the feedfoward network, number of heads etc.
-        self.layer_B = nn.TransformerEncoderLayer(token_dim.dB, n_head)
-        self.layer_C = nn.TransformerEncoderLayer(token_dim.dC, n_head)
-        self.layer_D = nn.TransformerEncoderLayer(token_dim.dD, n_head)
-        self.layer_E = nn.TransformerEncoderLayer(token_dim.dE, n_head)
+        self.layer_B = nn.TransformerEncoderLayer(token_dim.dB, n_head, batch_first=True)
+        self.layer_C = nn.TransformerEncoderLayer(token_dim.dC, n_head, batch_first=True)
+        self.layer_D = nn.TransformerEncoderLayer(token_dim.dD, n_head, batch_first=True)
+        self.layer_E = nn.TransformerEncoderLayer(token_dim.dE, n_head, batch_first=True)
 
     def forward(self, x: Tokens) -> Tokens:
         return Tokens(
@@ -44,7 +44,6 @@ class HeterogenousAttentionBlock(nn.Module):
         Received d_model -> {self.d_model}, n_head -> {self.n_head}, embedding_dim -> {self.embedding_dim}"""
 
         self.softmax = nn.Softmax(-1)
-        self.residual_layer = ResidualLayer()
         self.init_attention_layers()
         self.init_projection_networks()
 
@@ -71,8 +70,8 @@ class HeterogenousAttentionBlock(nn.Module):
         def projection_layer(o_dim: int):
             return nn.Sequential(
                 nn.Linear(self.embedding_dim * 4, o_dim),
+                nn.LayerNorm(o_dim, elementwise_affine=False),
                 nn.ReLU(),
-                nn.LayerNorm(o_dim)
             )
         self.p_A = projection_layer(self.token_dims.dA)
         self.p_B = projection_layer(self.token_dims.dB)
@@ -97,18 +96,15 @@ class HeterogenousAttentionBlock(nn.Module):
             v = v.reshape(*v.shape[:-2], self.n_head, self.d_model).transpose(
                 -3, -2
             )  # (nh, nv, d_model)
-            weights = self.softmax(
-                torch.matmul(q, k.transpose(-2, -1)) / np.sqrt(self.embedding_dim)
-            )
+            weights = self.softmax(torch.matmul(q, k.transpose(-2, -1)) / np.sqrt(self.d_model))
             output = torch.matmul(weights, v)  # (nh, nq, d_model)
             output = output.transpose(-3, -2)
-            output = output.reshape(*output.shape[:-2], -1, 1)  # (nq, nh * d_model, 1)
-            output = torch.squeeze(output, -1)
+            output = output.reshape(*output.shape[:-2], -1)  # (nq, nh * d_model)
             return output
 
         output = torch.concat(
             [single_attention_output(q, k, v) for k, v in kv_pairs], dim=-1
-        )
+        ) / np.sqrt(len(kv_pairs))
         return output
 
     def forward(self, x: Tokens) -> Tokens:
@@ -141,9 +137,5 @@ class HeterogenousAttentionBlock(nn.Module):
         additive_inp_E = self.p_E(attention_to_E)
 
         return Tokens(
-            self.residual_layer(x.A, additive_inp_A),
-            self.residual_layer(x.B, additive_inp_B),
-            self.residual_layer(x.C, additive_inp_C),
-            self.residual_layer(x.D, additive_inp_D),
-            self.residual_layer(x.E, additive_inp_E),
+            additive_inp_A, additive_inp_B, additive_inp_C, additive_inp_D, additive_inp_E
         )
