@@ -103,7 +103,7 @@ def run_inference_train(
             # fig = qc.draw(output="mpl")
             # plt.show()
             print(qc)
-            print(path.gates[i])
+            print(path.gates[i], path.unprepped_list[i])
             print("--------------------------------------------------------------")
 
         # print(f"Gate debug:")
@@ -132,7 +132,7 @@ if __name__ == "__main__":
 
     seed = 10
     np.random.seed(seed)
-    model_file = "output/full_run_2_10-epochs=20-lr=0.001-beta=(0.9, 0.999)-iter-8/model-7-35357.pt"
+    model_file = "output/full_run_2_10-epochs=10-lr=0.001-beta=(0.9, 0.999)-iter-9/model-9-35357.pt"
     dummy_wrapper = InferWrapper(
         ModelV0(
             128,

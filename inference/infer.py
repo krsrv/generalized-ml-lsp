@@ -187,7 +187,9 @@ class Path:
     Class for each path in beam search.
     Or class for an entire beam.
 
-    `unprepped` only makes sense if self.bs = 1
+    `unprepped` if set, refers to whether any state in the beam is the ground state.
+    `unprepped_list` marks each observation being unprepped.
+
     Each class variable `observations`, `depths`, `gates` has dimension (width, bs, *)
     where width is the current width (defined by the observations tensor), and bs is the
     current batch size. For instance:
@@ -205,7 +207,8 @@ class Path:
         gates: list,
         width: int = 1,
         bs: int = 64,
-        unprepped: bool = False,
+        unprepped: bool = None,
+        unprepped_list: list[bool] = None,
         identifier: int = None,
     ):
         self.n = n
@@ -215,6 +218,7 @@ class Path:
         self.width = width
         self.bs = bs
         self.unprepped = unprepped
+        self.unprepped_list = unprepped_list
         self.identifier = identifier
         self.duplicate_tracker = None
         self.seen_sets = [set() for _ in range(bs)]
@@ -328,9 +332,10 @@ class Path:
                     self.observations[idx].cpu(),
                     self.depths[idx].cpu(),
                     self.gates[idx].cpu(),
-                    self.width,
-                    1,
-                    False,
+                    width=self.width,
+                    bs=1,
+                    unprepped=False,
+                    unprepped_list=np.zeros(self.observations[idx].shape[0], dtype=np.bool_),
                     identifier=self.identifier[idx, 0].cpu(),
                 )
             )
@@ -450,10 +455,11 @@ class Path:
                     self.observations[idx].reshape(bw * k, -1).cpu(),  # torch.tensor
                     self.depths[idx].reshape(bw * k, -1).cpu(),  # torch.tensor
                     self.gates[idx].reshape(bw * k, -1).cpu(),  # torch.tensor
-                    bw * k,
-                    1,
-                    True,
-                    self.identifier[idx, 0, 0].cpu(),
+                    width=bw * k,
+                    bs=1,
+                    unprepped=True,
+                    unprepped_list=is_unprepped[idx].reshape(-1),
+                    identifier=self.identifier[idx, 0, 0].cpu(),
                 )
             )
         # Filter out unprepped states from current state variables
@@ -671,6 +677,8 @@ class InferWrapper:
                         None,  # int32
                         width=1,
                         bs=batch_size,
+                        unprepped=None,
+                        unprepped_list=[],
                         identifier=torch.arange(0, batch_size).to(self.device),
                     )
                 else:
