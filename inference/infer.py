@@ -140,7 +140,10 @@ class BatchSimulator:
         self,
         states: np.ndarray,  # (bs, bw, 2*n*n+n)
         gates: np.ndarray,  # (bs, bw, k)
-    ):
+        hash_sets: list[set] = None,
+        filter_size: int = None,
+        torch_device: str = "cpu",
+    ) -> (torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor):
         assert (
             len(states.shape) == 3 and states.dtype == np.bool_
         ), f"states must be a 3D np.ndarray of dtype np.bool_, got shape={states.shape}, dtype={states.dtype}"
@@ -152,15 +155,21 @@ class BatchSimulator:
         k = gates.shape[-1]
         gates = gates.astype(np.int32)  # Needed for ctypes
         bs, bw, ts = states.shape
-        new_state = np.zeros((bs, bw, k, ts), dtype=states.dtype)
-        is_unprepped = np.zeros((bs, bw, k), dtype=np.bool_)
+        new_state = torch.zeros((bs, bw, filter_size, ts), dtype=torch.bool, device=torch_device)
+        is_unprepped = torch.zeros((bs, bw, filter_size), dtype=torch.bool, device=torch_device)
+        is_duplicate = torch.zeros((bs, bw, filter_size), dtype=torch.bool, device=torch_device)
+        filtered_idxs = torch.zeros((bs, bw, filter_size), dtype=torch.int)
+        # Run simulation for each element in the beam
         for i in range(bs):
+            seen_hashes = hash_sets[i]
             for j in range(bw):
+                # Prepare input
                 layout = self.layouts[i].reshape(-1).ctypes.data_as(ctypes.POINTER(ctypes.c_bool))
                 gate_set = np.ascontiguousarray(self.gate_set[i]).ctypes.data_as(
                     ctypes.POINTER(ctypes.c_int)
                 )
                 state = states[i, j].reshape(-1).ctypes.data_as(ctypes.POINTER(ctypes.c_bool))
+                # Run simulation
                 sim_result = self.lib.run_simulator(
                     n,
                     layout,
@@ -170,16 +179,44 @@ class BatchSimulator:
                     k,  # num_applied_gates
                     gates[i, j].ctypes.data_as(ctypes.POINTER(ctypes.c_int)),  # gates
                 )
-                # Access the array
+                # Access the result array
                 if not sim_result.stabilizers:
                     raise MemoryError("C function failed to allocate memory")
-                new_state[i, j] = np.ctypeslib.as_array(
-                    sim_result.stabilizers, shape=(k * ts,)
-                ).reshape(k, -1)
-                is_unprepped[i, j] = np.ctypeslib.as_array(sim_result.is_unprepped, shape=(k,))
+                buffer_states = torch.tensor(
+                    np.ctypeslib.as_array(sim_result.stabilizers, shape=(k * ts,)).reshape(k, -1),
+                    # device=torch_device,
+                ).to(torch.bool)
+                buffer_is_unprepped = torch.tensor(
+                    np.ctypeslib.as_array(sim_result.is_unprepped, shape=(k,)), device=torch_device
+                )
                 self.lib.free_stabilizers_struct(sim_result)
 
-        return new_state, is_unprepped
+                # Remove duplicates
+                duplicate_idxs = []
+                unique_idxs = []
+                for idx, candidate in enumerate(buffer_states):
+                    hv = hash(bytes(candidate.numpy()))
+                    if hv in seen_hashes:
+                        duplicate_idxs.append(idx)
+                    else:
+                        unique_idxs.append(idx)
+                        seen_hashes.add(hv)
+                unique_idxs = torch.tensor(unique_idxs)
+                duplicate_idxs = torch.tensor(duplicate_idxs)
+
+                is_duplicate[i, j] = torch.zeros(filter_size, dtype=torch.bool, device=torch_device)
+                if len(unique_idxs) >= filter_size:
+                    filtered_idxs[i, j] = unique_idxs[:filter_size]
+                else:
+                    duplicate_length = np.max([filter_size - len(unique_idxs), 0])
+                    filtered_idxs[i, j] = torch.concat(
+                        (unique_idxs[:filter_size], duplicate_idxs[:duplicate_length])
+                    )
+                    is_duplicate[i, j, len(unique_idxs) : len(unique_idxs) + duplicate_length] = 0
+                new_state[i, j] = buffer_states[filtered_idxs[i, j]].to(torch_device)
+                is_unprepped[i, j] = buffer_is_unprepped[filtered_idxs[i, j]]
+
+        return new_state, is_unprepped, is_duplicate, filtered_idxs.to(torch_device)
 
 
 class Path:
@@ -224,8 +261,7 @@ class Path:
         self.seen_sets = [set() for _ in range(bs)]
         if width == 1:
             for i in range(bs):
-                initial_hash = torch.hash_tensor(self.observations[i]).item()
-                self.seen_sets[i].add(initial_hash)
+                self.seen_sets[i].add(hash(bytes(self.observations[bs * i].cpu().numpy())))
 
     def __str__(self, layout=None, gate_set=None):
         st = f"Success: {self.is_successfully_unprepared()}"
@@ -344,40 +380,15 @@ class Path:
         self.gates = None
         self.identifier = None
 
-    def get_duplicate_tracker(self, observations: torch.Tensor) -> torch.Tensor:
-        # self.observations -> (bs, bw, k, 2n^2+n)
-        duplicate_tracker = torch.zeros(
-            observations.shape[:3], dtype=torch.bool, device=observations.device
-        )
-
-        hashed = torch.hash_tensor(observations, -1)  # (bs,bw, k)
-
-        for batch_idx in range(observations.shape[0]):
-            batch_hashes = hashed[batch_idx]
-            batch_hashes_flat = batch_hashes.flatten()
-            seen_hashes = self.seen_sets[batch_idx]
-            is_duplicate = torch.tensor(
-                [hash_val.item() in seen_hashes for hash_val in batch_hashes_flat],
-                dtype=torch.bool,
-                device=observations.device,
-            )
-
-            is_duplicate = is_duplicate.reshape(batch_hashes.shape)
-            duplicate_tracker[batch_idx] = is_duplicate
-
-            # Cast to int32 to avoid NotImplementedError for UInt64 index_cuda on CUDA
-            batch_hashes_flat = batch_hashes_flat.to(torch.int32)
-            is_duplicate_flat = is_duplicate.flatten()
-            new_hashes = batch_hashes_flat[~is_duplicate_flat]
-            for hash_val in new_hashes:
-                seen_hashes.add(hash_val.item())
-
-        return duplicate_tracker
-
     def update_states(
-        self, new_gates: torch.Tensor, unprepped_states: list["Path"], simulator: BatchSimulator
+        self,
+        gate_predictions: torch.Tensor,
+        unprepped_states: list["Path"],
+        simulator: BatchSimulator,
+        ke: int,
     ) -> (int, int, np.ndarray[bool]):
         """
+        TODO: Update documentation
         Update beam to add new gate and depth tensors.
         The `new_gates` tensor corresponds to the next gate to be applied in the circuit. For
         each path in the beam, and for each element in the batch, there are `k` new gates to
@@ -402,16 +413,36 @@ class Path:
         Returns:
             new batch size, new width, unprepped batches (bool np.ndarray)
         """
+        buffer_expansion = 4
+        _, new_gates = torch.topk(
+            gate_predictions, np.min([buffer_expansion * ke, gate_predictions.shape[-1]]), dim=-1
+        )
+        bs, bw, k_ = new_gates.shape
+        assert self.bs == bs, f"Batch size mismatch: self.bs={self.bs}, bs={bs}"
+
+        ###############
+        # Update observations
+        ###############
+        self.observations = self.observations.reshape(bs, bw, -1)
+        self.observations, is_unprepped, is_duplicate, filtered_idxs = simulator.run_simulation(
+            self.observations.cpu().numpy(),
+            new_gates.cpu().numpy(),
+            hash_sets=self.seen_sets,
+            filter_size=ke,
+            torch_device=self.observations.device,
+        )
+        # self.observations -> (bs, bw, k, 2n^2+n)
+        # self.duplicate_tracker  -> (bs, bw, k)
+        # is_unprepped -> (bs, bw, k)
+
         ###############
         # Add new gates
         ###############
-        bs, bw, k = new_gates.shape
-        assert self.bs == bs, f"Batch size mismatch: self.bs={self.bs}, bs={bs}"
-        new_gates = new_gates.unsqueeze(-1)
+        new_gates = new_gates.gather(-1, filtered_idxs).unsqueeze(-1)
         if self.gates is None:
             self.gates = new_gates
         else:
-            self.gates = self.gates.reshape(bs, bw, -1).unsqueeze(2).expand(-1, -1, k, -1)
+            self.gates = self.gates.reshape(bs, bw, -1).unsqueeze(2).expand(-1, -1, ke, -1)
             self.gates = torch.concat((self.gates, new_gates), dim=-1)
         # self.gates -> (bs, bw, k, depth+1)
 
@@ -419,7 +450,7 @@ class Path:
         # Update depths
         ###############
         self.depths = self.depths.reshape(bs, bw, -1)
-        self.depths = self.depths.unsqueeze(2).expand(-1, -1, k, -1)
+        self.depths = self.depths.unsqueeze(2).expand(-1, -1, ke, -1)
         # self.depths -> (bs, bw, k, depth+1)
 
         ###############
@@ -427,35 +458,22 @@ class Path:
         ###############
         if self.identifier is not None:
             self.identifier = self.identifier.reshape(bs, bw)
-            self.identifier = self.identifier.unsqueeze(-1).expand(-1, -1, k)
+            self.identifier = self.identifier.unsqueeze(-1).expand(-1, -1, ke)
         # self.identifier -> (bs, bw, k)
-
-        ###############
-        # Update observations
-        ###############
-        self.observations = self.observations.reshape(bs, bw, -1)
-        self.observations, is_unprepped = simulator.run_simulation(
-            self.observations.cpu().numpy(),
-            self.gates[:, :, :, -1].cpu().numpy(),
-        )
-        self.observations = torch.tensor(self.observations, device=self.gates.device)
-        # self.observations -> (bs, bw, k, 2n^2+n)
-        # self.duplicate_tracker  -> (bs, bw, k)
-        # is_unprepped -> (bs, bw, k)
 
         ###############
         # Remove unprepped states
         ###############
-        is_batch_unprepped = np.any(is_unprepped, axis=(-1, -2))
+        is_batch_unprepped = torch.any(is_unprepped, dim=(-1, -2)).cpu().numpy()
         # Add unprepped states to `unprepped_states`
         for idx in np.nonzero(is_batch_unprepped)[0]:
             unprepped_states.append(
                 Path(
                     self.n,
-                    self.observations[idx].reshape(bw * k, -1).cpu(),  # torch.tensor
-                    self.depths[idx].reshape(bw * k, -1).cpu(),  # torch.tensor
-                    self.gates[idx].reshape(bw * k, -1).cpu(),  # torch.tensor
-                    width=bw * k,
+                    self.observations[idx].reshape(bw * ke, -1).cpu(),  # torch.tensor
+                    self.depths[idx].reshape(bw * ke, -1).cpu(),  # torch.tensor
+                    self.gates[idx].reshape(bw * ke, -1).cpu(),  # torch.tensor
+                    width=bw * ke,
                     bs=1,
                     unprepped=True,
                     unprepped_list=is_unprepped[idx].reshape(-1),
@@ -465,9 +483,9 @@ class Path:
         # Filter out unprepped states from current state variables
         self.bs = bs = self.bs - np.count_nonzero(is_batch_unprepped)
         if self.bs != 0:
-            self.gates = self.gates[~is_batch_unprepped].reshape(k * bw * bs, -1)
-            self.depths = self.depths[~is_batch_unprepped].transpose(0, 2).reshape(k * bw * bs, -1)
-            self.observations = self.observations[~is_batch_unprepped].reshape(k * bw * bs, -1)
+            self.gates = self.gates[~is_batch_unprepped].reshape(ke * bw * bs, -1)
+            self.depths = self.depths[~is_batch_unprepped].transpose(0, 2).reshape(ke * bw * bs, -1)
+            self.observations = self.observations[~is_batch_unprepped].reshape(ke * bw * bs, -1)
             self.identifier = self.identifier[~is_batch_unprepped].reshape(-1)
         else:
             self.gates = None
@@ -475,7 +493,7 @@ class Path:
             self.observations = None
             self.identifier = None
 
-        self.width = k * bw
+        self.width = ke * bw
         return self.bs, self.width, is_batch_unprepped
 
     @staticmethod
@@ -684,9 +702,8 @@ class InferWrapper:
                 else:
                     gate_predictions = nn.Softmax(-1)(gate_prediction_logit)
                     expansion_ratio = 4 if depth != self.max_depth else 1
-                    _, top_gates = torch.topk(gate_predictions, expansion_ratio, dim=-1)
                     batch_size, width, unprepped_batches = curr_beam.update_states(
-                        top_gates, output_paths, simulator
+                        gate_predictions, output_paths, simulator, expansion_ratio
                     )
                     simulator.remove_batch(unprepped_batches)
                     data.remove_batch(unprepped_batches)
