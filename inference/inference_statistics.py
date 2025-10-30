@@ -173,6 +173,7 @@ if __name__ == "__main__":
     parser.add_argument("--beam-width", type=int, default=5, required=True, help="Beam width")
     parser.add_argument("--max-depth", type=int, default=10, required=True, help="Max depth")
     parser.add_argument("--batch-size", type=int, default=32, required=True, help="Batch size")
+    parser.add_argument("--remove-duplicates", action="store_true", help="Remove duplicates")
     args = parser.parse_args()
     print(f"Args: {args}")
 
