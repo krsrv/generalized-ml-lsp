@@ -45,6 +45,7 @@ def run_inference(
     max_depth: int,
     batch_size: int,
     beam_width: int,
+    remove_duplicate: bool = False,
 ):
     model = ModelV0(
         128,
@@ -84,6 +85,7 @@ def run_inference(
             data["gate_qubit_oh"],
             data["observation"],
             beam_width=beam_width,
+            remove_duplicate=remove_duplicate,
         )
         for i, path in enumerate(output_paths):
             # print("Depth shape", path.depths.shape)
@@ -175,16 +177,13 @@ if __name__ == "__main__":
     print(f"Args: {args}")
 
     args.model_file = (
-        "output/full_run_2_10-epochs=20-lr=0.001-beta=(0.9, 0.999)-iter-7/model-18-33698.pt"
-    )
-    args.model_file = (
-        "output/full_run_2_10-epochs=20-lr=0.001-beta=(0.9, 0.999)-iter-8/model-7-35357.pt"
+        "output/full_run_2_10-epochs=10-lr=0.001-beta=(0.9, 0.999)-iter-9/model-9-35357.pt"
     )
     args.dataset = "training-data/split/2-10-validation.npz"
     parent_dir = os.path.dirname(args.model_file)
     args.output_file = os.path.join(
         parent_dir,
-        f"parallel-inference-bw-{args.beam_width}-md-{args.max_depth}-bs-{args.batch_size}-no-duplicate.npz",
+        f"parallel-inference-bw-{args.beam_width}-md-{args.max_depth}-bs-{args.batch_size}-{'w' if args.remove_duplicate else 'wo'}-duplicate.npz",
     )
     print(f"Output file: {args.output_file}")
 
