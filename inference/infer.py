@@ -30,7 +30,7 @@ def is_symmetric_gate(gate):
 def get_gate_vectors(layout: np.ndarray, gate_set: list) -> (list, list, dict):
     # The implementation might be inefficient, but needs to match up with the
     # output from the CC functions Gate::getIndex() and Gate::fromIndex()
-    assert len(layout.shape) == 2, "Only batch size = 1 is supported."
+    assert len(layout.shape) == 2, "Batch input is not supported."
     gates, gate_qubits = [], []
     reverse_gate_dict = {}
     n = layout.shape[-1]
@@ -93,6 +93,10 @@ def is_successfully_unprepared(beam: list["Path"]):
 
 
 class BatchSimulator:
+    """
+    Class to run simulations on a batch of inputs. The key functions are `remove_batch` and `run_simulations`.
+    Metadata about the inputs are stored during initialization.
+    """
     # Define a ctypes Structure matching the C struct
     class Stabilizers(ctypes.Structure):
         _fields_ = [
@@ -133,6 +137,12 @@ class BatchSimulator:
         self.lib.free_stabilizers_struct.restype = None
 
     def remove_batch(self, is_batch_unprepped: np.ndarray):
+        """
+        Remove metadata corresponding to input batches
+        Input:
+            is_batch_unprepped: bool array with the same length as self.layouts. If true, then remove
+                the corresponding layout and gate set.
+        """
         self.layouts = self.layouts[~is_batch_unprepped]
         self.gate_set = self.gate_set[~is_batch_unprepped]
 
@@ -140,11 +150,31 @@ class BatchSimulator:
         self,
         states: np.ndarray,  # (bs, bw, 2*n*n+n)
         gates: np.ndarray,  # (bs, bw, k)
+        filter_size: int,
         hash_sets: list[set] = None,
-        filter_size: int = None,
         torch_device: str = "cpu",
         remove_duplicates: bool = False,
     ) -> (torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor):
+        """
+        Run simulation on input states and gates. Each states[i,j] will yield new `filter_size` states,
+        using the `gates[i,j]` tensor.
+        Input:
+            states: bool torch.Tensor(bs, bw, 2*n*n+n)
+            gates: int torch.Tensor(bs, bw, 2*n*n+n)
+            filter_size: expansion ratio
+            hash_sets: list of sets of hashes of seen states
+            torch_device: device for the torch tensors created
+            remove_duplicates: whether to remove duplicates
+
+        Output:
+            new_states: bool torch.Tensor(bs, bw, filter_size, 2*n*n+n)
+            is_unprepped: bool torch.Tensor(bs, bw, filter_size)
+                Indicates whether the resulting state corresponds to the ground state
+            is_duplicate: bool torch.Tensor(bs, bw, filter_size)
+                Indicates whether the resulting state has already been seen before
+            filtered_idx: int torch.Tensor(bs, bw, filter_size)
+                Indices of `gates` used for obtaining new states
+        """
         assert (
             len(states.shape) == 3 and states.dtype == np.bool_
         ), f"states must be a 3D np.ndarray of dtype np.bool_, got shape={states.shape}, dtype={states.dtype}"
@@ -154,6 +184,10 @@ class BatchSimulator:
 
         n = self.layouts.shape[-1]
         k = gates.shape[-1]
+        assert (
+            k >= filter_size
+        ), f"Need at least {filter_size} candidate gates to expand each input state. Instead received {k}"
+
         gates = gates.astype(np.int32)  # Needed for ctypes
         bs, bw, ts = states.shape
         new_state = torch.zeros((bs, bw, filter_size, ts), dtype=torch.bool, device=torch_device)
@@ -162,7 +196,7 @@ class BatchSimulator:
         filtered_idxs = torch.zeros((bs, bw, filter_size), dtype=torch.int)
         # Run simulation for each element in the beam
         for i in range(bs):
-            seen_hashes = hash_sets[i]
+            seen_hashes = hash_sets[i] if hash_sets is not None else set()
             for j in range(bw):
                 # Prepare input
                 layout = self.layouts[i].reshape(-1).ctypes.data_as(ctypes.POINTER(ctypes.c_bool))
@@ -228,7 +262,8 @@ class Path:
     Or class for an entire beam.
 
     `unprepped` if set, refers to whether any state in the beam is the ground state.
-    `unprepped_list` marks each observation being unprepped.
+    `unprepped_list[i]` stores whether the i-th path is unprepped. Note that this variable
+    is set only when `batch_size = 1`.
 
     Each class variable `observations`, `depths`, `gates` has dimension (width, bs, *)
     where width is the current width (defined by the observations tensor), and bs is the
@@ -394,27 +429,36 @@ class Path:
         ke: int,
     ) -> (int, int, np.ndarray[bool]):
         """
-        TODO: Update documentation
-        Update beam to add new gate and depth tensors.
-        The `new_gates` tensor corresponds to the next gate to be applied in the circuit. For
-        each path in the beam, and for each element in the batch, there are `k` new gates to
-        be added. Size: (beam width, batch size, # gates to explore)
+        Update beam to add new gate and depth tensors. The function will expand the beam and
+        add new states corresponding to the gates and update the width to `width * ke`.
+        The `gate_predictions` tensor tracks the probabilistic estimate of which gate should
+        be applied next in the circuit. In a given batch element, for each path in the beam,
+        there are `ke` new gates to be added. The tensor corresponding to new_gates will be
+        of size (bs, bw, ke).
         The `depths` tensor corresponds to the current depth prediction, and should be added
-        to each of the new copy generated. Size: (beam width, batch size).
+        to each of the new copy generated.
         After the update, new sizes are:
-        gates: (k, bw, bs, depth) -> (k * bw * bs, depth)
-        depths: (k, bw, bs, depth) -> (k * bw * bs, depth)
+        gates: (bs, bw, depth) -> (bs, bw, ke, depth+1) ==> (bs * bw * ke, depth+1)
+        depths: (bs, bw, depth) -> (bs, bw, ke, depth) ==> (bs * bw * ke, depth)
+
+        Any batch element which has been successfully unprepared in even one of the paths
+        will be copied to the `unprepped_states` list at the correct index and removed from
+        the beam.
+
+        The depths tensor will be updated using the `append_depth_tensor` member function.
 
         Args:
-            new_gates : torch.Tensor(bw, bs, k)
+            gate_predictions : torch.Tensor(bs, bw, num of gates = g)
             unprepped_states : list[Path]. List of currently unprepared states
             simulator : Batch Simulator with layout and gate set info already populated.
-                simulator.layout[i] and simulator.gate_set[i] corresponding to ith batch in
-                batch size
+                simulator.layout[i] and simulator.gate_set[i] corresponding to the batch
+                self.observations[i]
+            ke: Expansion ratio
 
         Modifies:
             unprepped_states : Adds all the batches which have at least one path where state
                 has been successfully unprepared
+            Almost all member variables.
 
         Returns:
             new batch size, new width, unprepped batches (bool np.ndarray)
@@ -431,10 +475,10 @@ class Path:
         ###############
         self.observations = self.observations.reshape(bs, bw, -1)
         self.observations, is_unprepped, is_duplicate, filtered_idxs = simulator.run_simulation(
-            self.observations.cpu().numpy(),
-            new_gates.cpu().numpy(),
+            self.observations.cpu().numpy(),  # states
+            new_gates.cpu().numpy(),  # gates
+            ke,  # filter_size
             hash_sets=self.seen_sets,
-            filter_size=ke,
             torch_device=self.observations.device,
             remove_duplicates=self.remove_duplicates,
         )
@@ -672,7 +716,9 @@ class InferWrapper:
             output_paths: list[Path]
                 The length of the list is the same as the batch size. The width of an element
                 might be more than the beam width, owing to the expansion stage of the beam
-                search.
+                search. But it will not be more than `expansion_ratio * beam_width`.
+                The order of the elements in `output_paths` will match the batch order in the
+                input.
         """
         # Initialize variables
         batch_size = evals.shape[0]
