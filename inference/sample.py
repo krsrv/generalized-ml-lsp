@@ -133,7 +133,7 @@ def run_inference_train(
         )
         depth_prediction = (path.depths[idx][0] + 2.2) * 2
         print(
-            f"Depth: {path.depths[0]} (predicted) vs {len(path.gates[0])} (inferred) vs {data["depth"][idx]} (actual)"
+            f"Depth: {depth_prediction} (predicted) vs {len(path.gates[0])} (inferred) vs {data["depth"][idx]} (actual)"
         )
         # print("\n\n\n")
 
