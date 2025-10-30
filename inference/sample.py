@@ -69,6 +69,7 @@ def run_inference_train(
     dataset: "DataLoader",
     max_depth: int,
     beam_width: int,
+    remove_duplicates: bool = False,
 ):
     wrapper = InferWrapper(model, None, max_depth)
 
@@ -78,45 +79,63 @@ def run_inference_train(
             break
         assert data["layout"].shape[0] == 1, "Batch size should be 1."
         n = data["layout"].shape[-1]
+
+        layout = data["layout"][:, :, :]
+        eigval = data["eigval"][:, :]
+        eigvec = data["eigvec"][:, :, :]
+        gate_oh = data["gate_oh"][:, :]
+        gate_qubit_oh = data["gate_qubit_oh"][:, :]
+        observation = data["observation"][:, :]
+
         output_paths = wrapper.infer_batch(
-            data["layout"],
-            data["eigval"],
-            data["eigvec"],
-            data["gate_oh"],
-            data["gate_qubit_oh"],
-            data["observation"],
+            layout,
+            eigval,
+            eigvec,
+            gate_oh,
+            gate_qubit_oh,
+            observation,
             beam_width=beam_width,
+            remove_duplicates=remove_duplicates,
         )
-        path = output_paths[0]
+        print(f"Datapoint #{i} {sum([x.unprepped for x in output_paths])}\n")
+        print(
+            "All paths populated? ",
+            not any([x is None for x in output_paths]),
+        )
+        idx = 0
+        path = output_paths[idx]
         path.gates = path.gates.numpy()
-        gate_set = np.unique(data["gate_oh"][0])
+        gate_set = np.unique(gate_oh[idx])
         qcs: list[qiskit.QuantumCircuit] = []
         for gates in path.gates:
-            qcs.append(get_qiskit_circuit(n, data["layout"][0], gate_set, gates))
+            qcs.append(get_qiskit_circuit(n, layout[idx], gate_set, gates))
 
-        print(f"Datapoint #{i}:")
-        print(f"Input state: {format_observation(data["observation"], n)}")
+        print(
+            f"Input state: {format_observation(observation[idx], n)}, {','.join([str(x) for x in observation[idx].astype(np.int_)])}"
+        )
         print(f"Allowed gates: {[name_dict[gate] for gate in gate_set]}")
         print("Unprepped successfully !!!!" if path.unprepped else "Unable to unprep :(")
         print(f"Proposed circuit:")
-        for i, qc in enumerate(qcs):
+        for j, qc in enumerate(qcs):
             # fig = qc.draw(output="mpl")
             # plt.show()
+            if not path.unprepped_list[j].item():
+                continue
             print(qc)
-            print(path.gates[i], path.unprepped_list[i])
+            print(path.gates[j], path.unprepped_list[j])
             print("--------------------------------------------------------------")
 
         # print(f"Gate debug:")
         # for gates in path.gates:
-        #     print(f"{get_gate_literals(gates, data['layout'][0], gate_set)}")
+        #     print(f"{get_gate_literals(gates, data['layout'][idx], gate_set)}")
         print(
-            f"True gate: {get_gate_literals(data["gate"], data["layout"][0], gate_set)[0]}, {data["gate"][0]}"
+            f"True gate: {get_gate_literals(data["gate"], data["layout"][idx], gate_set)[idx]}, {data["gate"][idx]}"
         )
-        depth_prediction = (path.depths[0][0] + 2.2) * 2
+        depth_prediction = (path.depths[idx][0] + 2.2) * 2
         print(
-            f"Depth: {depth_prediction} (predicted) vs {len(path.gates[0])} (inferred) vs {data["depth"][0]} (actual)"
+            f"Depth: {path.depths[0]} (predicted) vs {len(path.gates[0])} (inferred) vs {data["depth"][idx]} (actual)"
         )
-        print("\n\n\n")
+        # print("\n\n\n")
 
         # Print gate losses over inference train
 
@@ -127,6 +146,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Inference parameters")
     parser.add_argument("--beam-width", type=int, default=5, required=True, help="Beam width")
     parser.add_argument("--max-depth", type=int, default=10, required=True, help="Max depth")
+    parser.add_argument("--remove-duplicates", action="store_true", help="Remove duplicates")
     args = parser.parse_args()
     print(f"Args: {args}")
 
@@ -149,4 +169,6 @@ if __name__ == "__main__":
     dataset = UnprepNpzDataloader("training-data/split/2-10-validation.npz", shuffle=True)
     dataset.set_batch_size(1)
 
-    run_inference_train(dummy_wrapper.model, dataset, args.max_depth, args.beam_width)
+    run_inference_train(
+        dummy_wrapper.model, dataset, args.max_depth, args.beam_width, args.remove_duplicates
+    )

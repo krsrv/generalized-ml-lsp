@@ -45,7 +45,7 @@ def run_inference(
     max_depth: int,
     batch_size: int,
     beam_width: int,
-    remove_duplicate: bool = False,
+    remove_duplicates: bool = False,
 ):
     model = ModelV0(
         128,
@@ -85,7 +85,7 @@ def run_inference(
             data["gate_qubit_oh"],
             data["observation"],
             beam_width=beam_width,
-            remove_duplicate=remove_duplicate,
+            remove_duplicates=remove_duplicates,
         )
         for i, path in enumerate(output_paths):
             # print("Depth shape", path.depths.shape)
@@ -184,7 +184,7 @@ if __name__ == "__main__":
     parent_dir = os.path.dirname(args.model_file)
     args.output_file = os.path.join(
         parent_dir,
-        f"parallel-inference-bw-{args.beam_width}-md-{args.max_depth}-bs-{args.batch_size}-{'w' if args.remove_duplicate else 'wo'}-duplicate.npz",
+        f"parallel-inference-bw-{args.beam_width}-md-{args.max_depth}-bs-{args.batch_size}-{'wo' if args.remove_duplicates else 'w'}-duplicate.npz",
     )
     print(f"Output file: {args.output_file}")
 
@@ -198,4 +198,5 @@ if __name__ == "__main__":
         args.max_depth,
         args.batch_size,
         args.beam_width,
+        args.remove_duplicates,
     )
