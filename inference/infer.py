@@ -120,7 +120,7 @@ class BatchSimulator:
     def _setup_simulator_ctype(self):
         # Load shared library
         self.lib = ctypes.CDLL(
-            "../lsp_nonn/src/libsim.so",
+            "../lsp_nonn/output/libsim.so",
         )
         self.lib.run_simulator.argtypes = [
             ctypes.c_int,  # n
