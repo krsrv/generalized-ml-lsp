@@ -74,17 +74,19 @@ def run_inference_train(
     wrapper = InferWrapper(model, None, max_depth)
 
     tic = time.time()
+    count = 0
     for i, data in enumerate(iter(dataset)):
-        if i > 1:
-            break
         assert data["layout"].shape[0] == 1, "Batch size should be 1."
         n = data["layout"].shape[-1]
+        if count > 0:
+            break
+        count += 1
 
         layout = data["layout"][:, :, :]
         eigval = data["eigval"][:, :]
         eigvec = data["eigvec"][:, :, :]
-        gate_oh = data["gate_oh"][:, :]
-        gate_qubit_oh = data["gate_qubit_oh"][:, :]
+        gate_oh = data["gates"][:, :]
+        gate_qubit_oh = data["gate_qubits"][:, :]
         observation = data["observation"][:, :]
 
         output_paths = wrapper.infer_batch(
@@ -98,10 +100,6 @@ def run_inference_train(
             remove_duplicates=remove_duplicates,
         )
         print(f"Datapoint #{i} {sum([x.unprepped for x in output_paths])}\n")
-        print(
-            "All paths populated? ",
-            not any([x is None for x in output_paths]),
-        )
         idx = 0
         path = output_paths[idx]
         path.gates = path.gates.numpy()
@@ -110,9 +108,7 @@ def run_inference_train(
         for gates in path.gates:
             qcs.append(get_qiskit_circuit(n, layout[idx], gate_set, gates))
 
-        print(
-            f"Input state: {format_observation(observation[idx], n)}, {','.join([str(x) for x in observation[idx].astype(np.int_)])}"
-        )
+        print(f"Input state: ({n}) {format_observation(observation[idx], n)}")
         print(f"Allowed gates: {[name_dict[gate] for gate in gate_set]}")
         print("Unprepped successfully !!!!" if path.unprepped else "Unable to unprep :(")
         print(f"Proposed circuit:")
@@ -129,7 +125,7 @@ def run_inference_train(
         # for gates in path.gates:
         #     print(f"{get_gate_literals(gates, data['layout'][idx], gate_set)}")
         print(
-            f"True gate: {get_gate_literals(data["gate"], data["layout"][idx], gate_set)[idx]}, {data["gate"][idx]}"
+            f"True gate: {get_gate_literals(data["unprep_gate"], data["layout"][idx], gate_set)[idx]}, {data["unprep_gate"][idx]}"
         )
         depth_prediction = (path.depths[idx][0] + 2.2) * 2
         print(

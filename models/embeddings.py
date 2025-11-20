@@ -8,7 +8,7 @@ from .input import GT_1Q, GT_2Q, Layout
 from .tokens import TokenProperties, Tokens
 from .utils import create_oh_vectors_from_enum
 
-NUM_GATE_TYPES = 9
+NUM_GATE_TYPES = 15
 
 
 def _pad_last_dim(tensor: Tensor, pad_size: int) -> Tensor:

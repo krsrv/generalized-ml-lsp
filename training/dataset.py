@@ -89,7 +89,7 @@ class UnprepNpzDataloader:
         total = 0
         data = self.data
         for key in data.keys():
-            if not key.endswith("gate"):
+            if not key.endswith("unprep_gate"):
                 continue
             size = data[key].shape[0]
             total += size
@@ -193,21 +193,21 @@ class UnprepNpzDataloader:
 
         # Return the data
         data = self.cache[f"{n}/{g}"]
-        num_samples = data[f"gate"].shape[0]
+        num_samples = data[f"unprep_gate"].shape[0]
         eval, evec = transform_graph(data[f"layout"].reshape((num_samples, n, n))[idxs, :, :])
-        gates = data[f"gate_oh"].reshape((num_samples, -1))[idxs, :]
-        gate_qubits = data[f"gate_qubit_oh"].reshape((num_samples, -1))[idxs, :]
+        gates = data[f"gates"].reshape((num_samples, -1))[idxs, :]
+        gate_qubits = data[f"gate_qubits"].reshape((num_samples, -1))[idxs, :]
         # Construct the input
         object = {
             "layout": data[f"layout"].reshape((num_samples, n, n))[idxs, :, :],
             "eigval": eval,
             "eigvec": evec,
-            "gate_oh": gates,
-            "gate_qubit_oh": gate_qubits,
+            "gates": gates,
+            "gate_qubits": gate_qubits,
             "observation": self._convert_to_bool(
                 data[f"observation"].reshape((num_samples, -1))[idxs, :], n
             ),
-            "gate": data[f"gate"][idxs],
+            "unprep_gate": data[f"unprep_gate"][idxs],
             "depth": data[f"depth"][idxs],
         }
         self.iter_idx += 1

@@ -231,7 +231,7 @@ cost = Cost()
 total_num = 0
 tic = time.time()
 for i, data in enumerate(iter(train_data)):
-    n, g = data["layout"].shape[1], data["gate_oh"].shape[1]
+    n, g = data["layout"].shape[1], data["gates"].shape[1]
     batch = data["layout"].shape[0]
     cost = cost + single_iter_count(token_dims, Data(n, g), batch=batch)
     total_num += sum(get_size(x.shape) for x in data.values())

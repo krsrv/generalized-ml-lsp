@@ -36,17 +36,17 @@ def run_and_dump_output(model: nn.Module, dataset: UnprepNpzDataloader, output_f
             gate_prediction, depth_prediction = model.forward(
                 torch.tensor(data["eigval"], dtype=torch.float, device=device),
                 torch.tensor(data["eigvec"], dtype=torch.float, device=device),
-                torch.tensor(data["gate_oh"], dtype=torch.long, device=device),
-                torch.tensor(data["gate_qubit_oh"], dtype=torch.long, device=device),
+                torch.tensor(data["gates"], dtype=torch.long, device=device),
+                torch.tensor(data["gate_qubits"], dtype=torch.long, device=device),
                 torch.tensor(data["observation"], dtype=torch.bool, device=device),
             )
         gate_loss = nn.CrossEntropyLoss(reduction="none")(
-            gate_prediction, torch.tensor(data["gate"], dtype=torch.int64, device=device)
+            gate_prediction, torch.tensor(data["unprep_gate"], dtype=torch.int64, device=device)
         )
         gate_loss_data = torch.concat((gate_loss_data, gate_loss.to("cpu")))
 
         n = data["layout"].shape[-1]
-        g = data["gate_oh"].shape[-1]
+        g = data["gates"].shape[-1]
         n_data = torch.concat((n_data, n * torch.ones(data["layout"].shape[0])))
         g_data = torch.concat((g_data, g * torch.ones(data["layout"].shape[0])))
 

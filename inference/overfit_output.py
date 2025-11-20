@@ -28,12 +28,12 @@ data = next(iter(train_data))
 gate_prediction, depth_prediction = model.forward(
     torch.tensor(data["eigval"], dtype=torch.float),
     torch.tensor(data["eigvec"], dtype=torch.float),
-    torch.tensor(data["gate_oh"], dtype=torch.long),
-    torch.tensor(data["gate_qubit_oh"], dtype=torch.long),
+    torch.tensor(data["gates"], dtype=torch.long),
+    torch.tensor(data["gate_qubits"], dtype=torch.long),
     torch.tensor(data["observation"], dtype=torch.bool),
 )
 print(nn.Softmax(-1)(gate_prediction.detach()).argmax(-1).numpy())
-print(data["gate"])
+print(data["unprep_gate"])
 
 n = data["eigval"].shape[1]
 print((depth_prediction.detach().numpy() + 1) * n * n / 4)

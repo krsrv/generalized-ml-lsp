@@ -90,8 +90,8 @@ class Trainer:
             gate_prediction, depth_prediction = self.model.forward(
                 torch.tensor(data["eigval"], dtype=torch.float).to(self.device),
                 torch.tensor(data["eigvec"], dtype=torch.float).to(self.device),
-                torch.tensor(data["gate_oh"], dtype=torch.long).to(self.device),
-                torch.tensor(data["gate_qubit_oh"], dtype=torch.long).to(self.device),
+                torch.tensor(data["gates"], dtype=torch.long).to(self.device),
+                torch.tensor(data["gate_qubits"], dtype=torch.long).to(self.device),
                 torch.tensor(data["observation"], dtype=torch.bool).to(self.device),
             )
             if use_eval:
@@ -202,11 +202,11 @@ class Trainer:
                 n,
                 gate_prediction,
                 depth_prediction,
-                torch.tensor(data["gate"], dtype=torch.int64).to(self.device),
+                torch.tensor(data["unprep_gate"], dtype=torch.int64).to(self.device),
                 torch.tensor(data["depth"], dtype=torch.int64).to(self.device),
             )
             loss = gate_loss + depth_loss
-            batch_size = data["gate"].shape[0]
+            batch_size = data["unprep_gate"].shape[0]
             total_loss += loss.cpu().item() * batch_size
             total_gate_loss += gate_loss.cpu().item() * batch_size
             total_depth_loss += depth_loss.cpu().item() * batch_size

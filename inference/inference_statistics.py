@@ -75,14 +75,14 @@ def run_inference(
 
     tic = batch_tic = time.time()
     for batch_idx, data in enumerate(iter(full_dataset)):
-        # print(f"Batch {batch_idx}: {data["layout"].shape[-1]}, {data["gate_oh"].shape[-1]}")
+        # print(f"Batch {batch_idx}: {data["layout"].shape[-1]}, {data["gates"].shape[-1]}")
         # continue
         output_paths = wrapper.infer_batch(
             data["layout"],
             data["eigval"],
             data["eigvec"],
-            data["gate_oh"],
-            data["gate_qubit_oh"],
+            data["gates"],
+            data["gate_qubits"],
             data["observation"],
             beam_width=beam_width,
             remove_duplicates=remove_duplicates,
@@ -100,11 +100,11 @@ def run_inference(
             unprepped_successfully = np.append(unprepped_successfully, path.unprepped)
             unprepped_optimally = np.append(unprepped_optimally, data["depth"][i] == inferred_depth)
             has_2_qubit_gate = torch.any(
-                torch.tensor([is_1_qubit_gate(gate) for gate in data["gate_oh"][path.identifier]])
+                torch.tensor([is_1_qubit_gate(gate) for gate in data["gates"][path.identifier]])
             )
             has_2_qubit_gateset = np.append(has_2_qubit_gateset, has_2_qubit_gate)
             has_2_qubit_gate_truth = np.append(
-                has_2_qubit_gate_truth, is_1_qubit_gate(data["gate"][path.identifier])
+                has_2_qubit_gate_truth, is_1_qubit_gate(data["unprep_gate"][path.identifier])
             )
 
         actual_depth = np.append(actual_depth, data["depth"])

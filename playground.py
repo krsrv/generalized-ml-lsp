@@ -146,12 +146,12 @@ def test_load_train_data_to_cpu():
     tic = time.time()
     for i, data in enumerate(iter(train_data)):
         # Start timing for this batch
-        gate = torch.tensor(data["gate"], dtype=torch.int64)
+        gate = torch.tensor(data["unprep_gate"], dtype=torch.int64)
         depth = torch.tensor(data["depth"], dtype=torch.int64)
         eigval = torch.tensor(data["eigval"], dtype=torch.float)
         eigvec = torch.tensor(data["eigvec"], dtype=torch.float)
-        gate_oh = torch.tensor(data["gate_oh"], dtype=torch.long)
-        gate_qubit_oh = torch.tensor(data["gate_qubit_oh"], dtype=torch.long)
+        gate_oh = torch.tensor(data["gates"], dtype=torch.long)
+        gate_qubit_oh = torch.tensor(data["gate_qubits"], dtype=torch.long)
         observation = torch.tensor(data["observation"], dtype=torch.bool)
         torch.cuda.synchronize()
         total_loaded += 1
@@ -183,14 +183,12 @@ def test_load_train_data_to_gpu():
     tic = time.time()
     for i, data in enumerate(iter(train_data)):
         # Start timing for this batch
-        gate = torch.tensor(data["gate"], dtype=torch.int64, device="cuda")
+        gate = torch.tensor(data["unprep_gate"], dtype=torch.int64, device="cuda")
         depth = torch.tensor(data["depth"], dtype=torch.int64, device="cuda")
         eigval = torch.tensor(data["eigval"], dtype=torch.float, device="cuda")
         eigvec = torch.tensor(data["eigvec"], dtype=torch.float, device="cuda")
-        gate_oh = torch.tensor(data["gate_oh"], dtype=torch.long, device="cuda")
-        gate_qubit_oh = torch.tensor(
-            data["gate_qubit_oh"], dtype=torch.long, device="cuda"
-        )
+        gate_oh = torch.tensor(data["gates"], dtype=torch.long, device="cuda")
+        gate_qubit_oh = torch.tensor(data["gate_qubits"], dtype=torch.long, device="cuda")
         observation = torch.tensor(data["observation"], dtype=torch.bool, device="cuda")
         torch.cuda.synchronize()
         total_loaded += 1
@@ -233,8 +231,8 @@ def test_run_inference():
         gate_prediction, depth_prediction = model.forward(
             torch.tensor(data["eigval"], dtype=torch.float).to("cuda"),
             torch.tensor(data["eigvec"], dtype=torch.float).to("cuda"),
-            torch.tensor(data["gate_oh"], dtype=torch.long).to("cuda"),
-            torch.tensor(data["gate_qubit_oh"], dtype=torch.long).to("cuda"),
+            torch.tensor(data["gates"], dtype=torch.long).to("cuda"),
+            torch.tensor(data["gate_qubits"], dtype=torch.long).to("cuda"),
             torch.tensor(data["observation"], dtype=torch.bool).to("cuda"),
         )
         if i % 1_000 == 0:
@@ -287,15 +285,15 @@ def test_run_inference_and_loss():
         gate_prediction, depth_prediction = model.forward(
             torch.tensor(data["eigval"], dtype=torch.float).to("cuda"),
             torch.tensor(data["eigvec"], dtype=torch.float).to("cuda"),
-            torch.tensor(data["gate_oh"], dtype=torch.long).to("cuda"),
-            torch.tensor(data["gate_qubit_oh"], dtype=torch.long).to("cuda"),
+            torch.tensor(data["gates"], dtype=torch.long).to("cuda"),
+            torch.tensor(data["gate_qubits"], dtype=torch.long).to("cuda"),
             torch.tensor(data["observation"], dtype=torch.bool).to("cuda"),
         )
         gate_loss, depth_loss = compute_loss(
             data["eigval"].shape[1],  # n
             gate_prediction,
             depth_prediction,
-            torch.tensor(data["gate"], dtype=torch.int64).to("cuda"),
+            torch.tensor(data["unprep_gate"], dtype=torch.int64).to("cuda"),
             torch.tensor(data["depth"], dtype=torch.int64).to("cuda"),
         )
         loss = gate_loss + depth_loss
