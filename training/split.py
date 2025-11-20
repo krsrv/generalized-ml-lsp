@@ -25,8 +25,26 @@ def timeit(func):
 
 
 class Splitter:
-    keywords = ["gate", "depth", "observation", "layout", "gate_oh", "gate_qubit_oh"]
-    keyword_dtypes = [np.int16, np.int16, np.bool_, np.bool_, np.int8, np.int8]
+    keywords = [
+        "unprep_gate",
+        "depth",
+        "observation",
+        "layout",
+        "gates",
+        "gate_qubits",
+        "topology",
+        "gate_set_type",
+    ]
+    keyword_dtypes = [
+        np.int32,
+        np.int32,
+        np.uint64,
+        np.uint8,
+        np.uint16,
+        np.uint16,
+        np.int32,
+        np.int32,
+    ]
 
     def __init__(self, files) -> None:
         self.data = []
@@ -265,7 +283,7 @@ class Splitter:
             data = self.data[file_idx]
             for keyword, dtype in zip(self.keywords, self.keyword_dtypes):
                 keyword_data = data[f"{n}/{g}/{keyword}"]
-                size = data[f"{n}/{g}/gate"].shape[0]
+                size = data[f"{n}/{g}/gates"].shape[0]
                 keyword_data = keyword_data.reshape((size, -1))
                 output[keyword] = np.concatenate(
                     (
@@ -346,11 +364,12 @@ if __name__ == "__main__":
 
     splitter = Splitter(
         [
-            "training-data/compiled/2-5_20000.npz",
-            "training-data/compiled/6-10_20000.npz",
-            "training-data/compiled/11-14_20000.npz",
-            "training-data/compiled/15-18_20000.npz",
-            "training-data/compiled/19-20_20000.npz",
+            "training-data/compiled/2-10-new.npz",
+            # "training-data/compiled/2-5_20000.npz",
+            # "training-data/compiled/6-10_20000.npz",
+            # "training-data/compiled/11-14_20000.npz",
+            # "training-data/compiled/15-18_20000.npz",
+            # "training-data/compiled/19-20_20000.npz",
         ]
     )
     print(f"Total size: {splitter.total_size}")

@@ -141,6 +141,18 @@ class UnprepNpzDataloader:
         # print(self.iter_order[:5])
         return self
 
+    def _convert_to_bool(self, data: np.ndarray, n: int):
+        bs, _ = data.shape
+        new_data = np.zeros((bs, n, 2 * n + 1))
+        for i in range(n):
+            for j in range(n):
+                # Z stabilizer
+                new_data[:, :, 2 * n - (i + 1)] = (data >> i) & 1
+                # X stabilizer
+                new_data[:, :, n - (i + 1)] = (data >> (32 + i)) & 1
+        new_data[:, :, -1] = (data >> 63) & 1
+        return new_data.reshape(bs, -1)
+
     # @timeit
     def __next__(self):
         """
@@ -192,7 +204,9 @@ class UnprepNpzDataloader:
             "eigvec": evec,
             "gate_oh": gates,
             "gate_qubit_oh": gate_qubits,
-            "observation": data[f"observation"].reshape((num_samples, -1))[idxs, :],
+            "observation": self._convert_to_bool(
+                data[f"observation"].reshape((num_samples, -1))[idxs, :], n
+            ),
             "gate": data[f"gate"][idxs],
             "depth": data[f"depth"][idxs],
         }
