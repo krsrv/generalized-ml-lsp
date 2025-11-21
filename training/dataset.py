@@ -142,6 +142,18 @@ class UnprepNpzDataloader:
         return self
 
     def _convert_to_bool(self, data: np.ndarray, n: int):
+        """
+        Convert int64 format of stabilizer to a bool format. The int64 format is defined in
+        `tableau_xz31.hpp`. It stores a [X1 ... Xn Z1 ... Zn sign] bool vector as a uint64 `v`
+        where (copied verbatim from `tableau_xz31.hpp`):
+        // 1. Pauli is written as $(-1)^{s} i^{a \cdot b} X^{a} Z^{b}$,
+        // where $a,b$ are vectors of length 31 with entries in $\{0,1\}$,
+        // $s \in \{0, 1\}$.
+        // 2.1. ((v >> 63) & 1) == s,
+        // 2.2. ((v >> 31) & 1) == 0,
+        // 2.3. ((v >> j) & 1) == b[j] for j in [0, 30],
+        // 2.4. ((v >> (j + 32)) & 1) == a[j] for j in [0, 30].
+        """
         bs, _ = data.shape
         new_data = np.zeros((bs, n, 2 * n + 1))
         for i in range(n):
@@ -163,10 +175,10 @@ class UnprepNpzDataloader:
         layout: (n, n) = Adjacency matrix
         eigval: (n) = Eigenvalues of the Laplacian matrix
         eigvec: (n, n) = Eigenvectors of the Laplacian matrix
-        gate_oh: (g) = gate instances
-        gate_qubit_oh: (2*g) = qubits involved in the gate instances
+        gates: (g) = gate instances
+        gate_qubits: (2*g) = qubits involved in the gate instances
         observation: (2 * n * n + n) = Observation of the target state
-        gate: (1) = Gate index
+        unprep_gate: (1) = Gate index
         depth: (1) = Depth of the circuit
 
         Example for n = 3, layout = fully connected, gate set = {H=0, CNOT=1, CZ=2}
@@ -178,8 +190,8 @@ class UnprepNpzDataloader:
                 it's a single qubit gate. The first 6 correspond to Hadamard, next 12 to CNOT and
                 last 6 to CZ.
         observation: [[1,0,0,0,0,0,0], [0,0,0,0,1,0,0], [0,0,1,0,0,1,1]]
-            Explanation: Each row is [X, Z, sign], in reverse ordering of qubits, i.e., right most
-            column is the first qubit.
+            Explanation: Each row is [X1, ..., Xn, Z1, ..., Zn, sign], with the leftmost column
+            being the first qubit.
         gate: 10
         depth: 3
         """

@@ -80,12 +80,40 @@ class UnprepDataExtractor:
 
 class UnprepDataCompiler:
     """
-    Given an npz file with keys `/n/g/hash/{key}`, collapse the hash level to create an
-    unpreparation dataset with keys `/n/g/{key}`.
+    Given npz files with keys in {unprep_gate, layout, observation, topology, gate_set_type,
+    depth, gates, gate_qubits}, combine them into a single file such that the resulting set
+    of datapoints:
+    * have # datapoints = `self.total_datapoints`
+    * has probability distribution over dataset defined by `self.intra_topology_sampling_ratio`
+      and `self.inter_topology_sampling_ratio`.
     """
 
     def __init__(self, files: list[str]) -> None:
         self.files = files
+        self.total_datapoints = 30_000_000
+        # Desired probability distribution
+        #   * Within each topology, 70% data should be the correct gateset, and 15% mismatch and
+        #     random each
+        self.intra_topology_sampling_ratio = {
+            Topology.FullyConnected: (0.15, 0.7, 0.15 * 4.2),
+            Topology.Random: (0.15, 0.15, 0.7),
+            Topology.Cubic: (0.7, 0.15, 0.15),
+            Topology.Square: (0.7, 0.15, 0.15),
+            Topology.Hex: (0.7, 0.15, 0.15),
+            Topology.HeavyHex: (0.7, 0.15, 0.15),
+            Topology.Linear: (0.7, 0.15, 0.15),
+        }
+
+        #   * Overall distribution between topologies
+        self.inter_topology_sampling_ratio = {
+            Topology.FullyConnected: 0.17,
+            Topology.Random: 0.20,
+            Topology.Cubic: 0.05,
+            Topology.Square: 0.17,
+            Topology.Hex: 0.155,
+            Topology.HeavyHex: 0.10,
+            Topology.Linear: 0.155,
+        }
 
     def load_data(self):
         self.data_list = {}
@@ -189,38 +217,14 @@ class UnprepDataCompiler:
         print("Raw dataset distribution")
         self._print_tabular_top_gs_data(total_size)
 
-        # Desired probability distributions:
-        #   * Within each topology, 70% data should be the correct gateset, and 15% mismatch and
-        #     random each
-        intra_topology_sampling_ratio = {
-            Topology.FullyConnected: (0.15, 0.7, 0.15 * 4.2),
-            Topology.Random: (0.15, 0.15, 0.7),
-            Topology.Cubic: (0.7, 0.15, 0.15),
-            Topology.Square: (0.7, 0.15, 0.15),
-            Topology.Hex: (0.7, 0.15, 0.15),
-            Topology.HeavyHex: (0.7, 0.15, 0.15),
-            Topology.Linear: (0.7, 0.15, 0.15),
-        }
-
-        #   * Overall distribution between topologies
-        inter_topology_sampling_ratio = {
-            Topology.FullyConnected: 0.17,
-            Topology.Random: 0.20,
-            Topology.Cubic: 0.05,
-            Topology.Square: 0.17,
-            Topology.Hex: 0.155,
-            Topology.HeavyHex: 0.10,
-            Topology.Linear: 0.155,
-        }
-
-        total_datapoints = 30_000_000
+        ### Pick samples to match desired probability distribution.
         sample_idxs = dict()
         for topo in Topology:
             for gs in GateSet:
                 proposed_final_sample_count = int(
-                    total_datapoints
-                    * inter_topology_sampling_ratio[topo]
-                    * intra_topology_sampling_ratio[topo][gs.value]
+                    self.total_datapoints
+                    * self.inter_topology_sampling_ratio[topo]
+                    * self.intra_topology_sampling_ratio[topo][gs.value]
                 )
                 available_sample_count = total_size.get((topo.value, gs.value), 0)
                 if proposed_final_sample_count > available_sample_count:

@@ -24,6 +24,18 @@ def elapsed_str(elapsed_bot, elapsed_bob, curr_batch_idx, total_batches, epoch_i
     return f"Iterated over {curr_batch_idx} batchs, {epoch_idx} epochs ({elapsed_bob} s)| Avg time: {avg_time:.7f} s/batch | Estimated time left for epoch: {est_str}"
 
 
+def normalize_depth(val, n):
+    # The depth distribution is uniform till d_max. Transform to a variable which
+    # has mean 0 and variance 1.
+    dmax = n * (n + 3) / 2 / np.log2(n)
+    return (val - dmax / 2) / np.sqrt(dmax)
+
+
+def unnormalize_depth(val, n):
+    dmax = n * (n + 3) / 2 / np.log2(n)
+    return val * np.sqrt(dmax) + dmax / 2
+
+
 class HyperParameters:
     def __init__(self, params: dict):
         self.params = params
@@ -116,7 +128,7 @@ class Trainer:
         self, n, gate_prediction, depth_prediction, true_gates, true_depth
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return self.gate_loss(gate_prediction, true_gates), self.alpha * (
-            self.depth_loss(depth_prediction, true_depth.float() / 2 - 2.2)
+            self.depth_loss(depth_prediction, normalize_depth(true_depth.float(), n))
         )
 
     def run_model(self, data, use_grad=True, use_eval=False):
@@ -141,7 +153,7 @@ class Trainer:
         self.model.to(self.device)
         print(f"Model now on device={self.device}")
 
-    def train(self, epochs=1):
+    def train(self, params: HyperParameters):
         self.set_device()
         train_gate_loss_history, train_depth_loss_history = [], []
         validation_gate_loss_history, validation_depth_loss_history = [], []
@@ -150,7 +162,8 @@ class Trainer:
         num_batches = self.train_data.get_total_size() / self.train_data.batch_size
 
         tic = time.time()
-        for epoch in range(epochs):
+        assert params["trainer/schedule"] == "naive", "Only naive training supported"
+        for epoch in range(params["trainer/schedule/epochs"]):
             batch_tic = time.time()
             for i, train_data in enumerate(iter(self.train_data)):
                 n = train_data["eigval"].shape[1]
@@ -371,7 +384,7 @@ if __name__ == "__main__":
     metadata["validation_time"] = toc - tic
 
     tic = time.time()
-    trainer.train(epochs=args.epochs)
+    trainer.train(params)
     toc = time.time()
     print(f"Training complete ({toc-tic} s)")
     metadata["train_time"] = toc - tic
