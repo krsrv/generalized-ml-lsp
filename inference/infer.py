@@ -530,10 +530,7 @@ class DataHolder:
             and gate_qubits is not None
         ), "Either (layout, gate_set) or (evals, evecs, gates, gate_qubits) must be provided"
         if layout is not None and gate_set is not None:
-            # self.gate_set = gate_set
-            self.evals, self.evecs = transform_graph(layout)
-            self.gates, self.gate_qubits, _ = get_gate_vectors(layout, gate_set)
-            self.n = layout.shape[0]
+            raise NotImplementedError("Layout and gate_set format is not yet supported.")
         else:
             assert len(evals.shape) == 2, "Input data needs to be in a batch format."
             self.evals = evals
