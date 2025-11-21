@@ -5,8 +5,9 @@ import numpy as np
 import qiskit
 import torch
 import torch.nn as nn
+from qiskit.circuit.library import UnitaryGate
 
-from inference.infer import InferWrapper, format_observation, get_gate_literals, name_dict
+from inference.infer import InferWrapper, format_observation, name_dict
 from models.model_v0 import ModelV0
 from training.dataset import UnprepNpzDataloader
 
@@ -32,35 +33,39 @@ Gate set:
 #     ]
 # )
 
+_iswapdg = UnitaryGate(
+    np.array([[1, 0, 0, 0], [0, 0, -1j, 0], [0, -1j, 0, 0], [0, 0, 0, 1]]), label="iswapdg"
+)
 
-def get_qiskit_circuit(n: int, layout: np.ndarray, gate_set: np.ndarray, gates: np.ndarray):
+circuit_lambda_map = {
+    0: lambda qc, x, y: qc.h(x),
+    1: lambda qc, x, y: qc.s(x),
+    2: lambda qc, x, y: qc.sdg(x),
+    3: lambda qc, x, y: qc.z(x),
+    4: lambda qc, x, y: qc.x(x),
+    5: lambda qc, x, y: qc.sx(x),
+    6: lambda qc, x, y: qc.sxdg(x),
+    7: lambda qc, x, y: qc.cx(x, y),
+    8: lambda qc, x, y: qc.cz(x, y),
+    9: lambda qc, x, y: qc.iswap(x, y),
+    10: lambda qc, x, y: qc.append(_iswapdg, [x, y]),
+    11: lambda qc, x, y: qc.rzz(np.pi / 2, x, y),
+    12: lambda qc, x, y: qc.rzz(-np.pi / 2, x, y),
+    13: lambda qc, x, y: qc.rxx(np.pi / 2, x, y),
+    14: lambda qc, x, y: qc.rxx(-np.pi / 2, x, y),
+}
+
+
+def get_qiskit_circuit(n: int, unitaries: np.ndarray, gates: np.ndarray, gate_qubits: np.ndarray):
     qc = qiskit.QuantumCircuit(n)
-    gates = get_gate_literals(gates, layout, gate_set)
-    for gate in gates:
-        split_parts = gate.split("-")
-        gate_type = split_parts[0]
-        qubit_indices = [int(idx) for idx in split_parts[1:]]
-        match gate_type:
-            case "H":
-                qc.h(qubit_indices[0])
-            case "S":
-                qc.s(qubit_indices[0])
-            case "Sdg":
-                qc.sdg(qubit_indices[0])
-            case "Z":
-                qc.z(qubit_indices[0])
-            case "X":
-                qc.x(qubit_indices[0])
-            case "sqrtX":
-                qc.sx(qubit_indices[0])
-            case "sqrtXdg":
-                qc.sxdg(qubit_indices[0])
-            case "CX":
-                qc.cx(qubit_indices[0], qubit_indices[1])
-            case "CZ":
-                qc.cz(qubit_indices[0], qubit_indices[1])
-            case _:
-                raise ValueError(f"Unknown gate type: {gate_type}")
+    # Refer to the input gates, gate_qubits array to extract details about the
+    # gate under consideration (`unitaries`).
+    gates = gates.reshape(-1)
+    gate_qubits = gate_qubits.reshape(-1, 2)
+    for u in unitaries:
+        gate_idx = gates[u]
+        q1, q2 = gate_qubits[u, 0], gate_qubits[u, 1]
+        circuit_lambda_map[gate_idx](qc, q1 - 1, q2 - 1 if q2 > 0 else 0)
     return qc
 
 
@@ -106,7 +111,7 @@ def run_inference_train(
         gate_set = np.unique(gate_oh[idx])
         qcs: list[qiskit.QuantumCircuit] = []
         for gates in path.gates:
-            qcs.append(get_qiskit_circuit(n, layout[idx], gate_set, gates))
+            qcs.append(get_qiskit_circuit(n, gates, gate_oh, gate_qubit_oh))
 
         print(f"Input state: ({n}) {format_observation(observation[idx], n)}")
         print(f"Allowed gates: {[name_dict[gate] for gate in gate_set]}")
@@ -121,19 +126,15 @@ def run_inference_train(
             print(path.gates[j], path.unprepped_list[j])
             print("--------------------------------------------------------------")
 
-        # print(f"Gate debug:")
-        # for gates in path.gates:
-        #     print(f"{get_gate_literals(gates, data['layout'][idx], gate_set)}")
-        print(
-            f"True gate: {get_gate_literals(data["unprep_gate"], data["layout"][idx], gate_set)[idx]}, {data["unprep_gate"][idx]}"
-        )
+        true_gate_idx = data["unprep_gate"][idx]
+        gate_qubits = gate_qubit_oh.reshape(-1, 2)
+        q1, q2 = gate_qubits[true_gate_idx, 0], gate_qubits[true_gate_idx, 1]
+        print(f"True gate: {true_gate_idx}-{q1}-{q2}, {data["unprep_gate"][idx]}")
         depth_prediction = (path.depths[idx][0] + 2.2) * 2
         print(
             f"Depth: {depth_prediction} (predicted) vs {len(path.gates[0])} (inferred) vs {data["depth"][idx]} (actual)"
         )
         # print("\n\n\n")
-
-        # Print gate losses over inference train
 
 
 if __name__ == "__main__":

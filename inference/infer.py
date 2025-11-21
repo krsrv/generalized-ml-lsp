@@ -6,6 +6,7 @@ import torch.nn as nn
 
 from training.dataset import transform_graph
 
+# Map from `tableau_xz31.hpp`
 name_dict = {
     0: "H",
     1: "S",
@@ -16,6 +17,12 @@ name_dict = {
     6: "sqrtXdg",
     7: "CX",
     8: "CZ",
+    9: "iSWAP",
+    10: "iSWAPdg",
+    11: "ZZ",
+    12: "ZZdg",
+    13: "XX",
+    14: "XXdg",
 }
 
 
@@ -25,44 +32,6 @@ def is_1_qubit_gate(gate):
 
 def is_symmetric_gate(gate):
     return gate == 8
-
-
-def get_gate_vectors(layout: np.ndarray, gate_set: list) -> (list, list, dict):
-    # The implementation might be inefficient, but needs to match up with the
-    # output from the CC functions Gate::getIndex() and Gate::fromIndex()
-    assert len(layout.shape) == 2, "Batch input is not supported."
-    gates, gate_qubits = [], []
-    reverse_gate_dict = {}
-    n = layout.shape[-1]
-    idx = 0
-    for gate in gate_set:
-        if is_1_qubit_gate(gate):
-            for i in range(n):
-                gates += [gate]
-                gate_qubits += [i + 1, 0]
-                reverse_gate_dict[idx] = f"{name_dict[gate]}-{i}"
-                idx += 1
-        else:
-            for i in range(n):
-                for j in range(n):
-                    if j <= i:
-                        continue
-                    if layout[i, j]:
-                        gates += [gate]
-                        gate_qubits += [i + 1, j + 1]
-                        reverse_gate_dict[idx] = f"{name_dict[gate]}-{i}-{j}"
-                        idx += 1
-            if not is_symmetric_gate(gate):
-                for i in range(n):
-                    for j in range(n):
-                        if j <= i:
-                            continue
-                        if layout[i, j]:
-                            gates += [gate]
-                            gate_qubits += [j + 1, i + 1]
-                            reverse_gate_dict[idx] = f"{name_dict[gate]}-{j}-{i}"
-                            idx += 1
-    return gates, gate_qubits, reverse_gate_dict
 
 
 def format_observation(obs: np.ndarray, n: int):
@@ -75,17 +44,6 @@ def format_observation(obs: np.ndarray, n: int):
         sign = "+" if row[-1] == 0 else "-"
         output.append(sign + "".join(pauli))
     return ",".join(output)
-
-
-def print_gate_keys(layout: np.ndarray, gate_set: np.ndarray):
-    _, _, rgd = get_gate_vectors(layout, gate_set)
-    for k, v in rgd.items():
-        print(f"{k}: {v}")
-
-
-def get_gate_literals(gate_array: np.ndarray, layout: np.ndarray, gate_set: np.ndarray):
-    _, _, rgd = get_gate_vectors(layout, gate_set)
-    return [rgd[gate] for gate in gate_array]
 
 
 def is_successfully_unprepared(beam: list["Path"]):
@@ -307,8 +265,6 @@ class Path:
         st = f"Success: {self.is_successfully_unprepared()}"
         st += "\n"
         # st += f"Observations : {[format_observation(x, self.n) for x in self.observations]}"
-        # st += "\n"
-        # st += f"Gates : {', '.join(get_gate_literals(self.gates, layout, gate_set))}"
         # st += "\n"
         st += f"Depths : {', '.join([f'{(x + 2.2).numpy() * 2:.2f}' for x in self.depths])}"
         st += "\n"
