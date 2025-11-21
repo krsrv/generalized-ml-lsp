@@ -146,22 +146,20 @@ class UnprepNpzDataloader:
         Convert int64 format of stabilizer to a bool format. The int64 format is defined in
         `tableau_xz31.hpp`. It stores a [X1 ... Xn Z1 ... Zn sign] bool vector as a uint64 `v`
         where (copied verbatim from `tableau_xz31.hpp`):
-        // 1. Pauli is written as $(-1)^{s} i^{a \cdot b} X^{a} Z^{b}$,
-        // where $a,b$ are vectors of length 31 with entries in $\{0,1\}$,
-        // $s \in \{0, 1\}$.
-        // 2.1. ((v >> 63) & 1) == s,
-        // 2.2. ((v >> 31) & 1) == 0,
-        // 2.3. ((v >> j) & 1) == b[j] for j in [0, 30],
-        // 2.4. ((v >> (j + 32)) & 1) == a[j] for j in [0, 30].
+        # 1. Pauli is written as (-1)^{s} i^{a · b} X^{a} Z^{b}, where a,b are vectors of
+        # length 31 with entries in {0,1}, s in {0, 1}.
+        # 2.1. ((v >> 63) & 1) == s,
+        # 2.2. ((v >> 31) & 1) == 0,
+        # 2.3. ((v >> j) & 1) == b[j] for j in [0, 30],
+        # 2.4. ((v >> (j + 32)) & 1) == a[j] for j in [0, 30].
         """
         bs, _ = data.shape
         new_data = np.zeros((bs, n, 2 * n + 1))
         for i in range(n):
-            for j in range(n):
-                # Z stabilizer
-                new_data[:, :, 2 * n - (i + 1)] = (data >> i) & 1
-                # X stabilizer
-                new_data[:, :, n - (i + 1)] = (data >> (32 + i)) & 1
+            # Z stabilizer
+            new_data[:, :, 2 * n - (i + 1)] = (data >> i) & 1
+            # X stabilizer
+            new_data[:, :, n - (i + 1)] = (data >> (32 + i)) & 1
         new_data[:, :, -1] = (data >> 63) & 1
         return new_data.reshape(bs, -1)
 
