@@ -154,7 +154,7 @@ class UnprepNpzDataloader:
         # 2.4. ((v >> (j + 32)) & 1) == a[j] for j in [0, 30].
         """
         bs, _ = data.shape
-        new_data = np.zeros((bs, n, 2 * n + 1))
+        new_data = np.zeros((bs, n, 2 * n + 1), dtype=np.bool_)
         for i in range(n):
             # Z stabilizer
             new_data[:, :, 2 * n - (i + 1)] = (data >> i) & 1
