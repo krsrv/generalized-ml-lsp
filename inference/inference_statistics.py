@@ -4,14 +4,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from inference.infer import (
-    InferWrapper,
-    Path,
-    format_observation,
-    get_gate_literals,
-    is_1_qubit_gate,
-    name_dict,
-)
+from inference.infer import InferWrapper, Path, is_1_qubit_gate
 from models.model_v0 import ModelV0
 from training.dataset import UnprepNpzDataloader
 
@@ -100,11 +93,11 @@ def run_inference(
             unprepped_successfully = np.append(unprepped_successfully, path.unprepped)
             unprepped_optimally = np.append(unprepped_optimally, data["depth"][i] == inferred_depth)
             has_2_qubit_gate = torch.any(
-                torch.tensor([is_1_qubit_gate(gate) for gate in data["gates"][path.identifier]])
+                torch.tensor([not is_1_qubit_gate(gate) for gate in data["gates"][path.identifier]])
             )
             has_2_qubit_gateset = np.append(has_2_qubit_gateset, has_2_qubit_gate)
             has_2_qubit_gate_truth = np.append(
-                has_2_qubit_gate_truth, is_1_qubit_gate(data["unprep_gate"][path.identifier])
+                has_2_qubit_gate_truth, not is_1_qubit_gate(data["unprep_gate"][path.identifier])
             )
 
         actual_depth = np.append(actual_depth, data["depth"])
