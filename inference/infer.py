@@ -68,9 +68,10 @@ class BatchSimulator:
         assert (
             len(layouts.shape) == 3 and layouts.dtype == np.bool_
         ), f"layouts must be a 3D np.ndarray of dtype np.bool_, got shape={layouts.shape}, dtype={layouts.dtype}"
-        assert (
-            len(gate_set.shape) == 2 and gate_set.dtype == np.int8
-        ), f"gate_set must be a 2D np.ndarray of dtype np.int8, got shape={gate_set.shape}, dtype={gate_set.dtype}"
+        assert len(gate_set.shape) == 2 and gate_set.dtype in [
+            np.int_,
+            np.uint,
+        ], f"gate_set must be a 2D np.ndarray of dtype np.int8, got shape={gate_set.shape}, dtype={gate_set.dtype}"
         self.layouts = layouts
         self.gate_set = gate_set.astype(np.int32)
         self._setup_simulator_ctype()
@@ -266,7 +267,7 @@ class Path:
         st += "\n"
         # st += f"Observations : {[format_observation(x, self.n) for x in self.observations]}"
         # st += "\n"
-        st += f"Depths : {', '.join([f'{(x + 2.2).numpy() * 2:.2f}' for x in self.depths])}"
+        st += f"Depths : {', '.join([f'{(x).numpy():.2f}' for x in self.depths])}"
         st += "\n"
         return st
 

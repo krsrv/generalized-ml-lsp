@@ -31,6 +31,31 @@ def transform_graph(adjacency_matrix):
         return np.linalg.eigh(laplacian)
 
 
+def _convert_to_bool(data: np.ndarray, n: int, old: bool = False):
+    if old:
+        return data
+    """
+    Convert int64 format of stabilizer to a bool format. The int64 format is defined in
+    `tableau_xz31.hpp`. It stores a [X1 ... Xn Z1 ... Zn sign] bool vector as a uint64 `v`
+    where (copied verbatim from `tableau_xz31.hpp`):
+    # 1. Pauli is written as (-1)^{s} i^{a · b} X^{a} Z^{b}, where a,b are vectors of
+    # length 31 with entries in {0,1}, s in {0, 1}.
+    # 2.1. ((v >> 63) & 1) == s,
+    # 2.2. ((v >> 31) & 1) == 0,
+    # 2.3. ((v >> j) & 1) == b[j] for j in [0, 30],
+    # 2.4. ((v >> (j + 32)) & 1) == a[j] for j in [0, 30].
+    """
+    bs, _ = data.shape
+    new_data = np.zeros((bs, n, 2 * n + 1), dtype=np.bool_)
+    for i in range(n):
+        # Z stabilizer
+        new_data[:, :, n + i] = (data >> i) & 1
+        # X stabilizer
+        new_data[:, :, i] = (data >> (32 + i)) & 1
+    new_data[:, :, -1] = (data >> 63) & 1
+    return new_data.reshape(bs, -1)
+
+
 def timeit(func):
     @wraps(func)
     def timeit_wrapper(*args, **kwargs):
@@ -53,9 +78,10 @@ class UnprepNpzDataloader:
     TODO: Increase support to multiple files.
     """
 
-    def __init__(self, file: str, shuffle: bool = True):
+    def __init__(self, file: str, shuffle: bool = True, old: bool = False):
         super().__init__()
         self.load_file(file)
+        self.old = old
         self.construct_metadata()
         self.shuffle = shuffle
         self.rng = np.random.default_rng()
@@ -89,8 +115,12 @@ class UnprepNpzDataloader:
         total = 0
         data = self.data
         for key in data.keys():
-            if not key.endswith("unprep_gate"):
-                continue
+            if self.old:
+                if not key.endswith("gate"):
+                    continue
+            else:
+                if not key.endswith("unprep_gate"):
+                    continue
             size = data[key].shape[0]
             total += size
             n, g, _ = key.split("/")
@@ -141,28 +171,6 @@ class UnprepNpzDataloader:
         # print(self.iter_order[:5])
         return self
 
-    def _convert_to_bool(self, data: np.ndarray, n: int):
-        """
-        Convert int64 format of stabilizer to a bool format. The int64 format is defined in
-        `tableau_xz31.hpp`. It stores a [X1 ... Xn Z1 ... Zn sign] bool vector as a uint64 `v`
-        where (copied verbatim from `tableau_xz31.hpp`):
-        # 1. Pauli is written as (-1)^{s} i^{a · b} X^{a} Z^{b}, where a,b are vectors of
-        # length 31 with entries in {0,1}, s in {0, 1}.
-        # 2.1. ((v >> 63) & 1) == s,
-        # 2.2. ((v >> 31) & 1) == 0,
-        # 2.3. ((v >> j) & 1) == b[j] for j in [0, 30],
-        # 2.4. ((v >> (j + 32)) & 1) == a[j] for j in [0, 30].
-        """
-        bs, _ = data.shape
-        new_data = np.zeros((bs, n, 2 * n + 1), dtype=np.bool_)
-        for i in range(n):
-            # Z stabilizer
-            new_data[:, :, 2 * n - (i + 1)] = (data >> i) & 1
-            # X stabilizer
-            new_data[:, :, n - (i + 1)] = (data >> (32 + i)) & 1
-        new_data[:, :, -1] = (data >> 63) & 1
-        return new_data.reshape(bs, -1)
-
     # @timeit
     def __next__(self):
         """
@@ -203,21 +211,25 @@ class UnprepNpzDataloader:
 
         # Return the data
         data = self.cache[f"{n}/{g}"]
-        num_samples = data[f"unprep_gate"].shape[0]
+        num_samples = data[f"gate"].shape[0] if self.old else data[f"unprep_gate"].shape[0]
         eval, evec = transform_graph(data[f"layout"].reshape((num_samples, n, n))[idxs, :, :])
-        gates = data[f"gates"].reshape((num_samples, -1))[idxs, :]
-        gate_qubits = data[f"gate_qubits"].reshape((num_samples, -1))[idxs, :]
+        if self.old:
+            gates = data[f"gate_oh"].reshape((num_samples, -1))[idxs, :]
+            gate_qubits = data[f"gate_qubit_oh"].reshape((num_samples, -1))[idxs, :]
+        else:
+            gates = data[f"gates"].reshape((num_samples, -1))[idxs, :]
+            gate_qubits = data[f"gate_qubits"].reshape((num_samples, -1))[idxs, :]
         # Construct the input
         object = {
-            "layout": data[f"layout"].reshape((num_samples, n, n))[idxs, :, :],
+            "layout": data[f"layout"].reshape((num_samples, n, n))[idxs, :, :].astype(np.bool_),
             "eigval": eval,
             "eigvec": evec,
             "gates": gates,
             "gate_qubits": gate_qubits,
-            "observation": self._convert_to_bool(
-                data[f"observation"].reshape((num_samples, -1))[idxs, :], n
+            "observation": _convert_to_bool(
+                data[f"observation"].reshape((num_samples, -1))[idxs, :], n, self.old
             ),
-            "unprep_gate": data[f"unprep_gate"][idxs],
+            "unprep_gate": data[f"gate"][idxs] if self.old else data[f"unprep_gate"][idxs],
             "depth": data[f"depth"][idxs],
         }
         self.iter_idx += 1

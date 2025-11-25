@@ -24,14 +24,18 @@ def elapsed_str(elapsed_bot, elapsed_bob, curr_batch_idx, total_batches, epoch_i
     return f"Iterated over {curr_batch_idx} batchs, {epoch_idx} epochs ({elapsed_bob} s)| Avg time: {avg_time:.7f} s/batch | Estimated time left for epoch: {est_str}"
 
 
-def normalize_depth(val, n):
+def normalize_depth(val, n, old: bool = False):
     # The depth distribution is uniform till d_max. Transform to a variable which
     # has mean 0 and variance 1.
+    if old:
+        return val / 2 - 2.2
     dmax = n * (n + 3) / 2 / np.log2(n)
     return (val - dmax / 2) / np.sqrt(dmax)
 
 
-def unnormalize_depth(val, n):
+def unnormalize_depth(val, n, old: bool = False):
+    if old:
+        return (val + 2.2) * 2
     dmax = n * (n + 3) / 2 / np.log2(n)
     return val * np.sqrt(dmax) + dmax / 2
 
@@ -161,9 +165,9 @@ class Trainer:
 
         num_batches = self.train_data.get_total_size() / self.train_data.batch_size
 
-        tic = time.time()
         assert params["trainer/schedule"] == "naive", "Only naive training supported"
         for epoch in range(params["trainer/schedule/epochs"]):
+            epoch_tic = time.time()
             batch_tic = time.time()
             for i, train_data in enumerate(iter(self.train_data)):
                 n = train_data["eigval"].shape[1]
@@ -187,7 +191,7 @@ class Trainer:
                 if i % 1000 == 0:
                     print(
                         elapsed_str(
-                            time.time() - tic, time.time() - batch_tic, i, num_batches, epoch
+                            time.time() - epoch_tic, time.time() - batch_tic, i, num_batches, epoch
                         )
                     )
                     self.dump_loss_history(

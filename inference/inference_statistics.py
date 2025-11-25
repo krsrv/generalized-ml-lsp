@@ -54,12 +54,12 @@ def run_inference(
         max_depth,
     )
 
-    full_dataset = UnprepNpzDataloader(dataset_file, shuffle=False)
+    full_dataset = UnprepNpzDataloader(dataset_file, shuffle=True)
 
     full_dataset.set_batch_size(batch_size)
 
     unprepped_successfully = np.array([])  # Unprepped correctly
-    unprepped_optimally = np.array([])  # Unprepped in the correct number of gates
+    unprepped_better = np.array([])  # Unprepped in the correct number of gates
     depth_prediction = np.array([])  # Model's prediction of depth
     depth_inference = np.array([])  # Max depth that model tried for before termination
     actual_depth = np.array([])
@@ -91,7 +91,7 @@ def run_inference(
                 depth_inference = np.append(depth_inference, max_depth + 1)
             depth_prediction = np.append(depth_prediction, path.depths[0][0])
             unprepped_successfully = np.append(unprepped_successfully, path.unprepped)
-            unprepped_optimally = np.append(unprepped_optimally, data["depth"][i] == inferred_depth)
+            unprepped_better = np.append(unprepped_better, data["depth"][i] >= inferred_depth)
             has_2_qubit_gate = torch.any(
                 torch.tensor([not is_1_qubit_gate(gate) for gate in data["gates"][path.identifier]])
             )
@@ -119,7 +119,7 @@ def run_inference(
                 depth_prediction=depth_prediction,
                 actual_depth=actual_depth,
                 unprepped_successfully=unprepped_successfully,
-                unprepped_optimally=unprepped_optimally,
+                unprepped_better=unprepped_better,
                 has_2_qubit_gateset=has_2_qubit_gateset,
                 has_2_qubit_gate_truth=has_2_qubit_gate_truth,
                 seed=seed,
@@ -127,7 +127,7 @@ def run_inference(
 
     # print(f"Total datapoints: {full_dataset.get_total_size()}")
     # print(f"Number of correct inferences: {np.count_nonzero(unprepped_successfully)}")
-    # # print(f"Number of optimal inferences: {np.count_nonzero(unprepped_optimally)}")
+    # print(f"Number of optimal inferences: {np.count_nonzero(unprepped_better)}")
     # print(f"Depth metric:")
     # print(f"    Average: {np.mean(depth_inference)}")
     # print(f"    Median: {np.median(depth_inference)}")
@@ -150,7 +150,7 @@ def run_inference(
         depth_prediction=depth_prediction,
         actual_depth=actual_depth,
         unprepped_successfully=unprepped_successfully,
-        unprepped_optimally=unprepped_optimally,
+        unprepped_better=unprepped_better,
         has_2_qubit_gateset=has_2_qubit_gateset,
         has_2_qubit_gate_truth=has_2_qubit_gate_truth,
         seed=seed,
@@ -170,10 +170,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
     print(f"Args: {args}")
 
-    args.model_file = (
-        "output/full_run_2_10-epochs=10-lr=0.001-beta=(0.9, 0.999)-iter-9/model-9-35357.pt"
-    )
-    args.dataset = "training-data/split/2-10-validation.npz"
+    args.model_file = "output/model.pt"
+    args.dataset = "training-data/validation.npz"
     parent_dir = os.path.dirname(args.model_file)
     args.output_file = os.path.join(
         parent_dir,

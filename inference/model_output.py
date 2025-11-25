@@ -6,6 +6,7 @@ import torch.nn as nn
 
 from models.model_v0 import ModelV0
 from training.dataset import UnprepNpzDataloader
+from training.trainer import normalize_depth, unnormalize_depth
 
 
 def elapsed_str(elapsed_bot, elapsed_bob, curr_batch_idx, total_batches):
@@ -53,7 +54,7 @@ def run_and_dump_output(model: nn.Module, dataset: UnprepNpzDataloader, output_f
         true_depth = torch.tensor(data["depth"], dtype=torch.float, device=device)
         depth_loss = nn.MSELoss(reduction="none")(
             depth_prediction,
-            true_depth / 2 - 2.2,
+            normalize_depth(true_depth, n),
         ).to("cpu")
         depth_loss_data = torch.concat((depth_loss_data, depth_loss))
         true_depth_data = torch.concat((true_depth_data, true_depth.to("cpu")))
@@ -86,16 +87,13 @@ if __name__ == "__main__":
         32,
         hetero_attention_embed_dim=100,
     )
-    file = "output/full_run_2_10-epochs=20-lr=0.001-beta=(0.9, 0.999)-iter-8/model-7-35357.pt"
-    saved_data = torch.load(
-        "output/full_run_2_10-epochs=20-lr=0.001-beta=(0.9, 0.999)-iter-8/model-7-35357.pt",
-        weights_only=True,
-    )
+    file = "output/model.pt"
+    saved_data = torch.load(file, weights_only=True)
     model.load_state_dict(saved_data["model_state_dict"])
     model.to("cuda")
     model.eval()
 
     # # Check loss values for samples picked directly from the training set.
     # np.random.seed(4)
-    dataset = UnprepNpzDataloader("training-data/split/2-10-validation.npz")
+    dataset = UnprepNpzDataloader("training-data/validation.npz")
     run_and_dump_output(model, dataset, f"{os.path.dirname(file)}/model_output_data.pt")
