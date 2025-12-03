@@ -68,10 +68,9 @@ class BatchSimulator:
         assert (
             len(layouts.shape) == 3 and layouts.dtype == np.bool_
         ), f"layouts must be a 3D np.ndarray of dtype np.bool_, got shape={layouts.shape}, dtype={layouts.dtype}"
-        assert len(gate_set.shape) == 2 and gate_set.dtype in [
-            np.int_,
-            np.uint,
-        ], f"gate_set must be a 2D np.ndarray of dtype np.int8, got shape={gate_set.shape}, dtype={gate_set.dtype}"
+        assert (
+            len(gate_set.shape) == 2
+        ), f"gate_set must be a 2D np.ndarray, got shape={gate_set.shape}"
         self.layouts = layouts
         self.gate_set = gate_set.astype(np.int32)
         self._setup_simulator_ctype()
