@@ -2,6 +2,7 @@ import os
 import random
 import shutil
 import string
+from ctypes import sizeof
 from enum import Enum
 
 import numpy as np
@@ -81,18 +82,23 @@ class UnprepDataExtractor:
 class UnprepDataCompiler:
     """
     Given npz files with keys in {unprep_gate, layout, observation, topology, gate_set_type,
-    depth, gates, gate_qubits}, combine them into a single file such that the resulting set
+    depth, gates, gate_qubits}, combine them into npz fragments such that the resulting set
     of datapoints:
     * have # datapoints = `self.total_datapoints`
     * has probability distribution over dataset defined by `self.intra_topology_sampling_ratio`
       and `self.inter_topology_sampling_ratio`.
+
+    Input: list of filenames to be combined
+    Output via create_npz_file(filename): npz files with name "{filename}-f{fragment number}.npz".
+    Note that `load_data` must be called before `create_npz_file`.
     """
 
     def __init__(self, files: list[str]) -> None:
         self.files = files
+        # Desired output distribution:
+        #   0. Total number of points
         self.total_datapoints = 30_000_000
-        # Desired probability distribution
-        #   * Within each topology, 70% data should be the correct gateset, and 15% mismatch and
+        #   1. Within each topology, 70% data should be the correct gateset, and 15% mismatch and
         #     random each
         self.intra_topology_sampling_ratio = {
             Topology.FullyConnected: (0.15, 0.7, 0.15 * 4.2),
@@ -104,7 +110,7 @@ class UnprepDataCompiler:
             Topology.Linear: (0.7, 0.15, 0.15),
         }
 
-        #   * Overall distribution between topologies
+        #   2. Overall distribution between topologies
         self.inter_topology_sampling_ratio = {
             Topology.FullyConnected: 0.17,
             Topology.Random: 0.20,
@@ -139,12 +145,6 @@ class UnprepDataCompiler:
     def get_total_size(self):
         return self.total_size
 
-    def _create_temp_folder(self):
-        self.temp_folder = None
-        while self.temp_folder is None or os.path.exists(self.temp_folder):
-            self.temp_folder = "".join(random.choices(string.ascii_lowercase + string.digits, k=8))
-        os.makedirs(self.temp_folder)
-
     def _pick_samples(
         self, arrays: list[np.ndarray], files: list[str], num_samples: int, output_dict: dict
     ) -> int:
@@ -174,7 +174,11 @@ class UnprepDataCompiler:
             offset += ng_num_samples[i]
         return total_samples
 
-    def _print_tabular_top_gs_data(self, data):
+    def _print_tabular_top_gs_data(self, data: dict[int, int]) -> None:
+        """
+        Pretty print data which stores the number of datapoints corresponding to
+        each (topology, gateset) int tuple.
+        """
         # Build header row
         headers = [""] + [gs.name for gs in GateSet]
 
@@ -189,8 +193,19 @@ class UnprepDataCompiler:
         print(tabulate(table, headers=headers, tablefmt="grid"))
 
     def _parse_tableau_data(self, data: np.ndarray, n: int):
+        """
+        Helper function to transform n tableaus in pauli_xz31_t format to
+        bool array.
+        """
+        assert (
+            len(data.shape) == 2
+        ), f"Expected a 2D array, received {len(data.shape)}D array for `data`"
+        assert data.shape[1] == n * (
+            2 * n + 1
+        ), f"Expected n*(2*n+1) columns, received {data.shape[1]} columns for `data`"
+
         bs, _ = data.shape
-        new_data = np.zeros((bs, n, 2 * n + 1))
+        new_data = np.zeros((bs, n, 2 * n + 1), dtype=np.bool_)
         for i in range(n):
             for j in range(n):
                 # Z stabilizer
@@ -201,6 +216,11 @@ class UnprepDataCompiler:
         return new_data.reshape(bs, -1)
 
     def create_npz_file(self, filename: str):
+        """
+        Main function to create npz file outputs. `filename` is the prefix (eg - "output/2-28").
+        The function chunks the data into ~10 GB sizes and dumps them as fragments (eg - "output/2-28-f0.npz").
+        Note: run `load_data` before calling this function.
+        """
         topo_gs_idxs = {}
         total_size = {}
         for k, data in self.data_list.items():
@@ -255,6 +275,9 @@ class UnprepDataCompiler:
             n_g[(n, g)].append((file, idxs))
 
         dump_data = {}
+        counter = 0
+        curr_size = 0
+        fragment_counter = 0
         for k, vs in n_g.items():
             n, g = k
             for i, v in enumerate(vs):
@@ -262,38 +285,51 @@ class UnprepDataCompiler:
                 curr_data = self.data_list[file]
                 original_bs = curr_data["depth"].shape[0]
                 bs = len(idxs)
-                observations = (
-                    curr_data["observation"].reshape(original_bs, -1)[idxs, :].reshape(-1)
-                )
+                observations = curr_data["observation"].reshape(original_bs, -1)[idxs, :]
                 formatted_data = {
                     "unprep_gate": curr_data["unprep_gate"][idxs],
                     "depth": curr_data["depth"][idxs],
                     "observation": observations,
                     # Copy for each
-                    "layout": np.stack([curr_data["layout"]] * bs, axis=0),
-                    "gates": np.stack([curr_data["gates"]] * bs, axis=0),
-                    "gate_qubits": np.stack([curr_data["gate_qubits"]] * bs, axis=0),
+                    "layout": np.stack(
+                        [curr_data["layout"].reshape(n, n).astype(np.bool_)] * bs, axis=0
+                    ),
+                    "gates": np.stack([curr_data["gates"].reshape(g)] * bs, axis=0),
+                    "gate_qubits": np.stack([curr_data["gate_qubits"].reshape(g, 2)] * bs, axis=0),
                     "topology": np.concatenate([curr_data["topology"]] * bs),
                     "gate_set_type": np.concatenate([curr_data["gate_set_type"]] * bs),
                 }
                 for key in formatted_data:
+                    curr_size += formatted_data[key].nbytes
                     if i == 0:
                         dump_data[f"{n}/{g}/{key}"] = formatted_data[key]
                     else:
                         dump_data[f"{n}/{g}/{key}"] = np.concatenate(
                             (dump_data[f"{n}/{g}/{key}"], formatted_data[key]), axis=0
                         )
+            counter += 1
+            print(f"Completed dataset sampling for {n}/{g} ({counter} out of {len(n_g)})")
+            # Dump data if more than 10 GB
+            if (curr_size >> 30) > 10:
+                print(f"Saving fragment #{fragment_counter}")
+                np.savez(f"{filename}-f{fragment_counter}.npz", **dump_data)
+                dump_data = {}
+                curr_size = 0
+                fragment_counter += 1
 
-            print(f"Completed dataset sampling for {n}/{g}")
-
-        print("Saving to npz")
-        np.savez_compressed(filename, **dump_data)
+        if curr_size > 0:
+            print(f"Saving fragment #{fragment_counter}")
+            np.savez(f"{filename}-f{fragment_counter}.npz", **dump_data)
 
 
 if __name__ == "__main__":
     import argparse
+    import re
     import time
 
+    #########################
+    ##  UnprepDataExtractor
+    #########################
     # input_files = [
     #     # List of input files, with .npz extension. Example:
     #     # "training-data/2-5_20000.npz",
@@ -309,15 +345,30 @@ if __name__ == "__main__":
     #     toc = time.time()
     #     print(f"Converted {input_file} -> {output_file} ({toc-tic} sec)")
 
-    parser = argparse.ArgumentParser(description="Trainer hyperparameters")
-    parser.add_argument("--filename", type=str, required=True, help="Output filename")
+    #########################
+    ##  UnprepDataCompiler
+    #########################
+    parser = argparse.ArgumentParser(description="Convert C++ data output to ML training format")
+    parser.add_argument(
+        "--filename", type=str, required=True, help="Output filename, without npz extension"
+    )
+    parser.add_argument("--folder", type=str, required=True, help="Input folder")
     args = parser.parse_args()
 
-    assert args.filename.endswith(".npz"), "Output filename must end with '.npz'"
-    assert not os.path.exists(args.filename), f"{args.filename} already exists"
+    assert not args.filename.endswith(".npz"), "Output filename must not end with '.npz'"
+    base_dir = os.path.dirname(args.filename)
+    base_filename = os.path.basename(args.filename)
+    existing_fragments = [
+        fname
+        for fname in os.listdir(base_dir)
+        if re.match(rf"{re.escape(base_filename)}-f\d+\.npz$", fname)
+    ]
+    assert (
+        not existing_fragments
+    ), f"Fragments for {args.filename} already exist: {existing_fragments}"
 
     tic = time.time()
-    folder = "../lsp_nonn/output/2_10_data/"
+    folder = args.folder
     files = [folder + x for x in list(os.listdir(folder))]
     compiler = UnprepDataCompiler(files)
     compiler.load_data()
