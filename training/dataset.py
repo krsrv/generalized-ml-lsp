@@ -70,17 +70,139 @@ def timeit(func):
     return timeit_wrapper
 
 
+class ShardReader:
+    def __init__(self, files: list[str]):
+        super().__init__()
+        self.files = files
+        self.load_data()
+        self.construct_metadata()
+        self.batch_size = 64
+
+    def load_data(self):
+        self.data = {}
+        for file in self.files:
+            self.data[file] = np.load(file)
+
+    def construct_metadata(self):
+        """
+        Store metadata about the data. Metadata includes:
+        1. per_shard_aggregate_metadata - ith element stores a dictionary of (n, g) -> size
+        2. size_list - list of sizes in each shard
+        """
+        # To support multiple files, look at the module training.split for inspiration.
+        import os
+
+        self.per_shard_aggregate_metadata = [None for _ in self.files]
+        total = 0
+        for i, file in enumerate(self.files):
+            data = np.load(file)
+            self.per_shard_aggregate_metadata[i] = {}
+            for key in data:
+                if not key.endswith("unprep_gate"):
+                    continue
+                size = data[key].shape[0]
+                total += size
+                n, g, _ = key.split("/")
+                self.per_shard_aggregate_metadata[i][(int(n), int(g))] = size
+            del data
+        self.size_list = np.array(
+            [w for v in self.per_shard_aggregate_metadata for w in v.values()]
+        )
+
+    def set_batch_size(self, batch_size):
+        """
+        Manually set the `batch_size` in the iter.
+        """
+        self.batch_size = batch_size
+
+    def _init_shard_iter(self, shard_idx):
+        """
+        Load data in memory and reset iteration indices for shard corresponding to `shard_idx`
+        """
+        if hasattr(self, "loaded_data"):
+            del self.loaded_data
+        # Load the data in memory
+        self.loaded_data = {}
+        data = np.load(self.files[shard_idx])
+        for key in data:
+            self.loaded_data[key] = data[key]
+
+        # Set the iteration elements
+        # Set up bookmarks for:
+        #  1. iteration order of (n, g) to go over for this shard
+        #  2. iteration index
+        #  3. starting offset for each (n, g)
+        self.iter_idx = 0
+        self.iter_ng_counter = {}
+        self.iter_order = []
+        for k, v in self.per_shard_aggregate_metadata[shard_idx].items():
+            num_batches = int(v // self.batch_size)
+            self.iter_ng_counter[k] = 0
+            for i in range(num_batches):
+                self.iter_order.append(k)
+        np.random.shuffle(self.iter_order)
+
+    def __iter__(self):
+        self.shard_idx = 0
+        self._init_shard_iter(self.shard_idx)
+        return self
+
+    def __next__(self):
+        if self.iter_idx >= len(self.iter_order):
+            self.shard_idx += 1
+            # If we reach the end of all shards, we have finished iterating
+            if self.shard_idx >= len(self.files):
+                raise StopIteration
+            # Else, move to next shard
+            print("Reading new shard")
+            self._init_shard_iter(self.shard_idx)
+
+        ######################################################################
+        # For iteration, we pick the current (n, g) value to sample, and pick
+        # `batch_size` elements starting from the current offset for (n, g).
+        # We are guaranteed that the starting offset won't exceed the number
+        # of datapoints that exist for (n, g).
+        ######################################################################
+        # Extract the current (n, g) key
+        k = self.iter_order[self.iter_idx]
+        n, g = k
+
+        # Return the data
+        start_idx = self.iter_ng_counter[(n, g)]
+        idxs = np.arange(start_idx, start_idx + self.batch_size)
+        layout = self.loaded_data[f"{n}/{g}/layout"][idxs]
+        eval, evec = transform_graph(layout)
+        gate_qubits = self.loaded_data[f"{n}/{g}/gate_qubits"][idxs].reshape(layout.shape[0], -1)
+        # Construct the input
+        object = {
+            "layout": layout,
+            "eigval": eval,
+            "eigvec": evec,
+            "gates": self.loaded_data[f"{n}/{g}/gates"][idxs],
+            "gate_qubits": gate_qubits,
+            "observation": _convert_to_bool(self.loaded_data[f"{n}/{g}/observation"][idxs], n),
+            "unprep_gate": self.loaded_data[f"{n}/{g}/unprep_gate"][idxs],
+            "depth": self.loaded_data[f"{n}/{g}/depth"][idxs],
+        }
+        self.iter_ng_counter[(n, g)] += self.batch_size
+        self.iter_idx += 1
+        return object
+
+    def get_total_size(self):
+        return np.sum(self.size_list)
+
+
 class UnprepNpzDataloader:
     """
-    Class to handle HDF5 files (where keys are `n/g/{key}`). The data is a collection of circuit
+    Class to handle npz files (where keys are `n/g/{key}`). The data is a collection of circuit
     layout, gate sets, input state and unpreparation unitary (just 1 gate). For now, the class
     supports handling only 1 file as input.
     TODO: Increase support to multiple files.
     """
 
-    def __init__(self, file: str, shuffle: bool = True, old: bool = False):
+    def __init__(self, file: str, shuffle: bool = True, old: bool = False, mload: bool = True):
         super().__init__()
-        self.load_file(file)
+        self.load_file(file, mload)
         self.old = old
         self.construct_metadata()
         self.shuffle = shuffle
@@ -88,19 +210,18 @@ class UnprepNpzDataloader:
         self.batch_size = 64
 
     @timeit
-    def load_file(self, file):
+    def load_file(self, file: str, mload: bool = True):
         """
         Use only 1 file as input. Register the file as a member of the class.
         """
-        self.data = np.load(file, "r")
-        self.cache = defaultdict(dict)
-
-        for key in self.data:
-            parts = key.split("/")
-            if len(parts) == 3:
-                n, g, d = parts
-                group_key = f"{n}/{g}"
-                self.cache[group_key][d] = self.data[key]  # loads into memory
+        data = np.load(file, "r")
+        if mload:
+            self.data = {}
+            # Load in memory
+            for key in data:
+                self.data[key] = data[key]
+        else:
+            self.data = data
 
     def construct_metadata(self):
         """
@@ -168,7 +289,6 @@ class UnprepNpzDataloader:
                 )
         if self.shuffle:
             np.random.shuffle(self.iter_order)
-        # print(self.iter_order[:5])
         return self
 
     # @timeit
@@ -189,9 +309,9 @@ class UnprepNpzDataloader:
 
         Example for n = 3, layout = fully connected, gate set = {H=0, CNOT=1, CZ=2}
         layout: [[0, 1, 1], [1, 0, 1], [1, 1, 0]]
-        gate_oh: [0, 0, 0, 1, 1, 1, 1, 1, 1, 2, 2, 2]
+        gates: [0, 0, 0, 1, 1, 1, 1, 1, 1, 2, 2, 2]
             Explanation: 3 Hadamard, 6 CNOT, 3 CZ gate instances
-        gate_qubit_oh: [1, 0, 2, 0, 3, 0, 2, 1, 3, 1, 3, 2, 1, 2, 1, 3, 2, 3, 2, 1, 3, 1, 3, 2]
+        gate_qubits: [1, 0, 2, 0, 3, 0, 2, 1, 3, 1, 3, 2, 1, 2, 1, 3, 2, 3, 2, 1, 3, 1, 3, 2]
             Explanation: Each gate has 2 qubits for its gate instance. The second qubit is 0 if
                 it's a single qubit gate. The first 6 correspond to Hadamard, next 12 to CNOT and
                 last 6 to CZ.
@@ -206,31 +326,184 @@ class UnprepNpzDataloader:
 
         # Extract the current (n, g) key
         k, idxs = self.iter_order[self.iter_idx]
-        size = len(idxs)
+        # size = len(idxs)
         n, g = k
 
         # Return the data
-        data = self.cache[f"{n}/{g}"]
-        num_samples = data[f"gate"].shape[0] if self.old else data[f"unprep_gate"].shape[0]
-        eval, evec = transform_graph(data[f"layout"].reshape((num_samples, n, n))[idxs, :, :])
+        num_samples = (
+            self.data[f"{n}/{g}/gate"].shape[0]
+            if self.old
+            else self.data[f"{n}/{g}/unprep_gate"].shape[0]
+        )
+        layout = self.data[f"{n}/{g}/layout"].reshape((num_samples, n, n))[idxs].astype(np.bool_)
+        eval, evec = transform_graph(layout)
         if self.old:
-            gates = data[f"gate_oh"].reshape((num_samples, -1))[idxs, :]
-            gate_qubits = data[f"gate_qubit_oh"].reshape((num_samples, -1))[idxs, :]
+            gates = self.data[f"{n}/{g}/gate_oh"].reshape((num_samples, -1))[idxs]
+            gate_qubits = self.data[f"{n}/{g}/gate_qubit_oh"].reshape((num_samples, -1))[idxs]
         else:
-            gates = data[f"gates"].reshape((num_samples, -1))[idxs, :]
-            gate_qubits = data[f"gate_qubits"].reshape((num_samples, -1))[idxs, :]
+            gates = self.data[f"{n}/{g}/gates"][idxs]
+            gate_qubits = self.data[f"{n}/{g}/gate_qubits"][idxs].reshape(layout.shape[0], -1)
         # Construct the input
         object = {
-            "layout": data[f"layout"].reshape((num_samples, n, n))[idxs, :, :].astype(np.bool_),
+            "layout": layout,
             "eigval": eval,
             "eigvec": evec,
             "gates": gates,
             "gate_qubits": gate_qubits,
             "observation": _convert_to_bool(
-                data[f"observation"].reshape((num_samples, -1))[idxs, :], n, self.old
+                self.data[f"{n}/{g}/observation"].reshape((num_samples, -1))[idxs], n, self.old
             ),
-            "unprep_gate": data[f"gate"][idxs] if self.old else data[f"unprep_gate"][idxs],
-            "depth": data[f"depth"][idxs],
+            # self.data[f"{n}/{g}/observation"],
+            "unprep_gate": (
+                self.data[f"{n}/{g}/gate"][idxs]
+                if self.old
+                else self.data[f"{n}/{g}/unprep_gate"][idxs]
+            ),
+            "depth": self.data[f"{n}/{g}/depth"][idxs],
+        }
+        self.iter_idx += 1
+        return object
+
+    def get_total_size(self):
+        return np.sum(self.size_list)
+
+
+class UnprepNpyDataloader:
+    """
+    Class to handle npy files (where file names are `n-g-{key}`). The data is a collection of circuit
+    layout, gate sets, input state and unpreparation unitary (just 1 gate). For now, the class
+    supports handling only 1 file as input.
+    TODO: Increase support to multiple files.
+    """
+
+    def __init__(self, folder: str, shuffle: bool = True, old: bool = False):
+        super().__init__()
+        self.folder = folder
+        self.old = old
+        self.construct_metadata()
+        self.shuffle = shuffle
+        self.rng = np.random.default_rng()
+        self.batch_size = 64
+
+    def construct_metadata(self):
+        """
+        Store metadata about the data. Metadata includes:
+        1. aggregate_metadata - reverse map of (n, g) -> size of dataset
+        2. size_list - list of sizes of each (n, g) dataset
+        3. ng_list - list of (n, g). Same order as size_list.
+        """
+        # To support multiple files, look at the module training.split for inspiration.
+        import os
+
+        self.aggregate_metadata = {}
+        total = 0
+        for file in os.listdir(self.folder):
+            data = np.load(self.folder + "/" + file)
+            if not file.endswith("unprep_gate.npy"):
+                continue
+            size = data.shape[0]
+            total += size
+            n, g, _ = file.split("-")
+            self.aggregate_metadata[(int(n), int(g))] = size
+            del data
+        self.size_list = np.array([v for v in self.aggregate_metadata.values()])
+
+    def set_batch_size(self, batch_size):
+        """
+        Manually set the `batch_size` in the iter.
+        """
+        self.batch_size = batch_size
+
+    def __iter__(self):
+        self.iter_idx = 0
+        # Set the iteration order
+        self.iter_order = []
+        for k, v in self.aggregate_metadata.items():
+            n, g = k
+            num_batches = int(v // self.batch_size)
+            if num_batches == 0:
+                continue
+            idxs = np.arange(v)
+            if self.shuffle:
+                np.random.shuffle(idxs)
+            for i in range(num_batches):
+                self.iter_order.append(
+                    (k, np.sort(idxs[i * self.batch_size : (i + 1) * self.batch_size]))
+                )
+        if self.shuffle:
+            np.random.shuffle(self.iter_order)
+        return self
+
+    # @timeit
+    def __next__(self):
+        """
+        Return the next element in iter. The returned batch might not have `batch_size` elements, if
+        there are fewer than `batch_size` elements remaining in the (n, g) dataset.
+
+        Description of the data (for num_samples = 1):
+        layout: (n, n) = Adjacency matrix
+        eigval: (n) = Eigenvalues of the Laplacian matrix
+        eigvec: (n, n) = Eigenvectors of the Laplacian matrix
+        gates: (g) = gate instances
+        gate_qubits: (2*g) = qubits involved in the gate instances
+        observation: (2 * n * n + n) = Observation of the target state
+        unprep_gate: (1) = Gate index
+        depth: (1) = Depth of the circuit
+
+        Example for n = 3, layout = fully connected, gate set = {H=0, CNOT=1, CZ=2}
+        layout: [[0, 1, 1], [1, 0, 1], [1, 1, 0]]
+        gates: [0, 0, 0, 1, 1, 1, 1, 1, 1, 2, 2, 2]
+            Explanation: 3 Hadamard, 6 CNOT, 3 CZ gate instances
+        gate_qubits: [1, 0, 2, 0, 3, 0, 2, 1, 3, 1, 3, 2, 1, 2, 1, 3, 2, 3, 2, 1, 3, 1, 3, 2]
+            Explanation: Each gate has 2 qubits for its gate instance. The second qubit is 0 if
+                it's a single qubit gate. The first 6 correspond to Hadamard, next 12 to CNOT and
+                last 6 to CZ.
+        observation: [[1,0,0,0,0,0,0], [0,0,0,0,1,0,0], [0,0,1,0,0,1,1]]
+            Explanation: Each row is [X1, ..., Xn, Z1, ..., Zn, sign], with the leftmost column
+            being the first qubit.
+        gate: 10
+        depth: 3
+        """
+        if self.iter_idx >= len(self.iter_order):
+            raise StopIteration
+
+        # Extract the current (n, g) key
+        k, idxs = self.iter_order[self.iter_idx]
+        # size = len(idxs)
+        n, g = k
+
+        # Return the data
+        # unprep_gate = self.data[
+        #     f"{n}/{g}/unprep-gate.npy"
+        # ]
+        unprep_gate = np.load(f"{self.folder}/{n}-{g}-unprep_gate.npy")
+        num_samples = unprep_gate.shape[0]
+        layout = (
+            np.load(f"{self.folder}/{n}-{g}-layout.npy")
+            .reshape((num_samples, n, n))[idxs]
+            .astype(np.bool_)
+        )
+        eval, evec = transform_graph(layout)
+        if self.old:
+            gates = self.data[f"{n}/{g}/gate_oh"].reshape((num_samples, -1))[idxs]
+            gate_qubits = self.data[f"{n}/{g}/gate_qubit_oh"].reshape((num_samples, -1))[idxs]
+        else:
+            gates = np.load(f"{self.folder}/{n}-{g}-gates.npy").reshape((num_samples, -1))[idxs]
+            gate_qubits = np.load(f"{self.folder}/{n}-{g}-gate_qubits.npy").reshape(
+                (num_samples, -1)
+            )[idxs]
+        # Construct the input
+        object = {
+            "layout": layout,
+            "eigval": eval,
+            "eigvec": evec,
+            "gates": gates,
+            "gate_qubits": gate_qubits,
+            "observation": np.load(f"{self.folder}/{n}-{g}-observation.npy"),  # _convert_to_bool(
+            #     self.data[f"{n}/{g}/observation"].reshape((num_samples, -1))[idxs, :], n, self.old
+            # ),
+            "unprep_gate": unprep_gate[idxs],
+            "depth": np.load(f"{self.folder}/{n}-{g}-depth.npy")[idxs],
         }
         self.iter_idx += 1
         return object
