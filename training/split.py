@@ -25,6 +25,22 @@ def timeit(func):
 
 
 class Splitter:
+    """
+    Module to generate a train, test, validation split from a set of given files. Sample usage:
+    ```
+    splitter = Splitter(
+        [
+            "training-data/compiled/2-28-f0.npz",
+            "training-data/compiled/2-28-f1.npz",
+            "training-data/compiled/2-10_20000.npz",
+        ]
+    )
+    splitter.set_batch_size(64)
+    test_size, validation_size, train_size = splitter.generate_split(
+        "training-data/compiled", "sample"
+    )
+    ```
+    """
     keywords = [
         "unprep_gate",
         "depth",
@@ -39,7 +55,7 @@ class Splitter:
         np.int32,
         np.int32,
         np.uint64,
-        np.uint8,
+        np.bool_,
         np.uint16,
         np.uint16,
         np.int32,
@@ -51,6 +67,8 @@ class Splitter:
         for file in files:
             if not file.endswith(".npz"):
                 continue
+            # Note that if npz is in a compressed format, np.load
+            # will return a lazy loader.
             data = np.load(file)
             self.data.append(data)
 
@@ -122,6 +140,15 @@ class Splitter:
 
     @timeit
     def generate_split(self, folder: str, file_prefix: str) -> None:
+        """
+        Member function to generate the actual split. The function works by splitting
+        each set of datapoints for (n, g) into a train, test, validation npz file,
+        storing them in `{folder}/_tmp`, and then finally merging the splits into one
+        big file.
+        The data is not actually manipulated until the very end stage where we actually
+        dump contents to each file. We instead first sample and split indices into the
+        train, test, validation buckets.
+        """
         assert self.batch_size is not None
         ###########################################################################
         # Among all (n, g) tuples, calculate the indices of (n, g) tuples
@@ -207,7 +234,7 @@ class Splitter:
                 g,
                 file_idxs,
                 offset_idxs,
-                f"{folder}/tmp/{file_prefix}-{n}-{g}-test.npz",
+                f"{folder}/_tmp/{file_prefix}-{n}-{g}-test.npz",
             )
             total_test_size += dump_size
 
@@ -223,7 +250,7 @@ class Splitter:
                 g,
                 file_idxs,
                 offset_idxs,
-                f"{folder}/tmp/{file_prefix}-{n}-{g}-validation.npz",
+                f"{folder}/_tmp/{file_prefix}-{n}-{g}-validation.npz",
             )
             total_validation_size += dump_size
 
@@ -239,11 +266,11 @@ class Splitter:
                 g,
                 file_idxs,
                 offset_idxs,
-                f"{folder}/tmp/{file_prefix}-{n}-{g}-train.npz",
+                f"{folder}/_tmp/{file_prefix}-{n}-{g}-train.npz",
             )
             total_train_size += dump_size
 
-        self.coalesce_files(folder, "tmp", file_prefix)
+        self.coalesce_files(folder, "_tmp", file_prefix)
         self.delete_temp_files(folder)
         return total_test_size, total_validation_size, total_train_size
 
@@ -266,36 +293,41 @@ class Splitter:
         offset_idxs: np.ndarray,
         filename: str,
     ) -> None:
+        """
+        Helper function to dump each (n, g) dataset (either train, test, or validation).
+        The function retrieves the actual data using the file_idxs and offset_idxs arguments.
+        """
         os.makedirs(os.path.dirname(filename), exist_ok=True)
-
-        output = {
-            keyword: np.array([], dtype=dtype)
-            for keyword, dtype in zip(self.keywords, self.keyword_dtypes)
-        }
-
-        # Condense the file_idxs array into a smaller one without repitions.
+        # Condense the file_idxs array into a smaller one without repititions.
         file_idxs, counts = np.unique(file_idxs, return_counts=True)
+        if len(file_idxs) == 0:
+            return 0
         counts = np.concatenate(([0], np.cumsum(counts)))
         offset_idxs = [
             offset_idxs[counts[i] : counts[i + 1]] for i in range(file_idxs.shape[0])
         ]
+        output = {}
         for file_idx, offset_idx in zip(file_idxs, offset_idxs):
             data = self.data[file_idx]
             for keyword, dtype in zip(self.keywords, self.keyword_dtypes):
                 keyword_data = data[f"{n}/{g}/{keyword}"]
-                size = data[f"{n}/{g}/gates"].shape[0]
-                keyword_data = keyword_data.reshape((size, -1))
-                output[keyword] = np.concatenate(
-                    (
-                        output[keyword],
-                        keyword_data[offset_idx, :].reshape(-1).astype(dtype),
+                if keyword in output:
+                    output[keyword] = np.concatenate(
+                        (
+                            output[keyword],
+                            keyword_data[offset_idx].astype(dtype),
+                        )
                     )
-                )
+                else:
+                    output[keyword] = keyword_data[offset_idx].astype(dtype)
         np.savez_compressed(filename, **output)
         return output["depth"].shape[0]
 
     @timeit
     def coalesce_files(self, folder: str, tmp_dir: str, file_prefix: str) -> None:
+        """
+        Helper function to merge all splits in `_tmp` folder into a a single big folder.
+        """
         test_files, train_files, validation_files = [], [], []
         for file in os.listdir(f"{folder}/{tmp_dir}"):
             if file.startswith(file_prefix):
@@ -305,9 +337,11 @@ class Splitter:
                     validation_files.append(file)
                 elif file.endswith("test.npz"):
                     test_files.append(file)
+
         for dataset, file_list in zip(
             ["test", "train", "validation"], [test_files, train_files, validation_files]
         ):
+            print(f"Coalescing {dataset} split")
             output = {}
             for file in file_list:
                 data = np.load(f"{folder}/{tmp_dir}/{file}")
@@ -315,17 +349,19 @@ class Splitter:
                 for keyword, dtype in zip(self.keywords, self.keyword_dtypes):
                     key = f"{n}/{g}/{keyword}"
                     if key not in output:
-                        output[key] = np.array([], dtype=dtype)
-                    output[f"{n}/{g}/{keyword}"] = np.concatenate(
-                        (
-                            output[f"{n}/{g}/{keyword}"],
-                            data[keyword],
+                        output[key] = data[keyword]
+                    else:
+                        output[f"{n}/{g}/{keyword}"] = np.concatenate(
+                            (
+                                output[f"{n}/{g}/{keyword}"],
+                                data[keyword],
+                            )
                         )
-                    )
             np.savez_compressed(f"{folder}/{file_prefix}-{dataset}.npz", **output)
 
     def delete_temp_files(self, folder: str) -> None:
-        tmp_folder = f"{folder}/tmp"
+        print("Deleting temp folder")
+        tmp_folder = f"{folder}/_tmp"
         if os.path.exists(tmp_folder) and os.path.isdir(tmp_folder):
             for root, dirs, files in os.walk(tmp_folder, topdown=False):
                 for name in files:
