@@ -8,7 +8,7 @@ import torch.nn as nn
 import torch.optim as optim
 
 from models.model_v0 import ModelV0
-from training.dataset import UnprepNpzDataloader
+from training.dataset import ShardReader, UnprepNpzDataloader
 
 
 def elapsed_str(elapsed_bot, elapsed_bob, curr_batch_idx, total_batches, epoch_idx):
@@ -63,6 +63,7 @@ class HyperParameters:
         self._update_if_not_set("trainer/schedule", "naive")
         self._update_if_not_set("trainer/schedule/epochs", 1)
         # self._update_if_not_set("trainer/schedule/datapoints", 1)
+        self._update_if_not_set("trainer/batch_size", 32)
         self._update_if_not_set("trainer/adam/lr", 0.001)
         self._update_if_not_set("trainer/adam/betas", (0.9, 0.999))
 
@@ -108,25 +109,42 @@ class Trainer:
         )
         print(f"Optimizer: {self.optimizer.__class__.__name__}")
 
-        self.train_data = UnprepNpzDataloader(
-            hyperparams.params["trainer/train_file"], shuffle=True
-        )
+        train_folder = hyperparams.params["trainer/train_file"]
+        self.train_data = ShardReader([train_folder + "/" + f for f in os.listdir(train_folder)])
+        # UnprepNpzDataloader(
+        #     hyperparams.params["trainer/train_file"], shuffle=True
+        # )
         self.validation_data = UnprepNpzDataloader(
             hyperparams.params["trainer/validation_file"], shuffle=False
         )
-        self.test_data = UnprepNpzDataloader(hyperparams.params["trainer/test_file"], shuffle=False)
+        self.test_data = UnprepNpzDataloader(
+            hyperparams.params["trainer/test_file"], shuffle=False, mload=False
+        )
         print("Total sizes of datasets:")
         print(f"Train - {self.train_data.get_total_size()}")
         print(f"Validation - {self.validation_data.get_total_size()}")
         print(f"Test - {self.test_data.get_total_size()}")
 
-        self.batch_size = 64
+        self.batch_size = hyperparams.params["trainer/batch_size"]
+        self.train_data.set_batch_size(self.batch_size)
+        self.validation_data.set_batch_size(self.batch_size)
+        self.test_data.set_batch_size(self.batch_size)
 
         self.gate_loss = nn.CrossEntropyLoss()
         self.depth_loss = nn.MSELoss()
         self.alpha = 1
 
         self.checkpoint_folder = output_folder
+
+    def _get_checkpoint_mod(self, num_batches: int):
+        # Checkpoint 10 times per epoch
+        return 1000
+        return int(np.ceil(num_batches / 1000.0)) * 1000 // 10
+
+    def _get_history_mod(self, num_batches: int):
+        # Checkpoint 50 times per epoch
+        return 1000
+        return int(np.ceil(num_batches / 1000.0)) * 1000 // 50
 
     def compute_loss(
         self, n, gate_prediction, depth_prediction, true_gates, true_depth
@@ -157,16 +175,66 @@ class Trainer:
         self.model.to(self.device)
         print(f"Model now on device={self.device}")
 
+    def load_loss_history(self, params: HyperParameters) -> list[np.ndarray]:
+        def load_default(key, dic, default, file):
+            if key in dic:
+                return dic[key]
+            else:
+                assert not os.path.exists(
+                    file
+                ), f"Loss file {file} already exists. Rename before proceeding."
+                return default
+
+        base_dir = os.path.basename(params["model_file"]) if "model_file" in params.params else ""
+        train_gate_loss_history = load_default(
+            "train_gate_loss_history", params.params, np.array([]), f"{base_dir}/gate_loss.npy"
+        )
+        train_depth_loss_history = load_default(
+            "train_depth_loss_history", params.params, np.array([]), f"{base_dir}/depth_loss.npy"
+        )
+        training_loss_history = load_default(
+            "training_loss_history", params.params, np.array([]), f"{base_dir}/training_loss.npy"
+        )
+
+        return (
+            train_gate_loss_history,
+            train_depth_loss_history,
+            training_loss_history,
+            [],
+            [],
+        )
+
+    def load_checkpoint(self, params: HyperParameters):
+        self.epoch_offset = 0
+        if "model_file" in params.params:
+            saved_data = torch.load(
+                params.params["model_file"], map_location="cpu", weights_only=True
+            )
+            self.model.load_state_dict(saved_data["model_state_dict"])
+            self.epoch_offset = saved_data["epoch"]
+
     def train(self, params: HyperParameters):
+        (
+            train_gate_loss_history,
+            train_depth_loss_history,
+            training_loss_history,
+            validation_gate_loss_history,
+            validation_depth_loss_history,
+        ) = self.load_loss_history(params)
+        self.load_checkpoint(params)
         self.set_device()
-        train_gate_loss_history, train_depth_loss_history = [], []
-        validation_gate_loss_history, validation_depth_loss_history = [], []
-        training_loss_history, validation_loss_history = [], []
 
         num_batches = self.train_data.get_total_size() / self.train_data.batch_size
+        checkpoint_mod = self._get_checkpoint_mod(num_batches)
+        loss_history_mod = self._get_history_mod(num_batches)
+        print(
+            f"Loss history and checkpoints will be stored every {loss_history_mod} and {checkpoint_mod} iterations respectively."
+        )
 
         assert params["trainer/schedule"] == "naive", "Only naive training supported"
-        for epoch in range(params["trainer/schedule/epochs"]):
+        for epoch in range(
+            self.epoch_offset, self.epoch_offset + params["trainer/schedule/epochs"]
+        ):
             epoch_tic = time.time()
             batch_tic = time.time()
             for i, train_data in enumerate(iter(self.train_data)):
@@ -184,9 +252,13 @@ class Trainer:
                 loss.backward()
                 self.optimizer.step()
 
-                training_loss_history.append(loss.detach().cpu().item())
-                train_gate_loss_history.append(gate_loss.detach().cpu().item())
-                train_depth_loss_history.append(depth_loss.detach().cpu().item())
+                training_loss_history = np.append(training_loss_history, loss.detach().cpu().item())
+                train_gate_loss_history = np.append(
+                    train_gate_loss_history, gate_loss.detach().cpu().item()
+                )
+                train_depth_loss_history = np.append(
+                    train_depth_loss_history, depth_loss.detach().cpu().item()
+                )
 
                 if i % 1000 == 0:
                     print(
@@ -194,17 +266,23 @@ class Trainer:
                             time.time() - epoch_tic, time.time() - batch_tic, i, num_batches, epoch
                         )
                     )
+                    batch_tic = time.time()
+
+                if i % loss_history_mod == 0:
                     self.dump_loss_history(
                         training_loss_history,
                         train_gate_loss_history,
                         train_depth_loss_history,
                     )
-                    batch_tic = time.time()
 
-                if i % 5000 == 0 and i > 0:
+                if i % checkpoint_mod == 0 and i > 0:
                     validation_gate_loss, validation_depth_loss = self.calculate_validation_score()
-                    validation_gate_loss_history.append(validation_gate_loss)
-                    validation_depth_loss_history.append(validation_depth_loss)
+                    validation_gate_loss_history = np.append(
+                        validation_gate_loss_history, validation_gate_loss
+                    )
+                    validation_depth_loss_history = np.append(
+                        validation_depth_loss_history, validation_depth_loss
+                    )
                     self.store_checkpoint(
                         epoch,
                         i,
@@ -216,12 +294,14 @@ class Trainer:
                         },
                     )
 
-                    batch_tic = time.time()
-
             # Also store at the end of the model
             validation_gate_loss, validation_depth_loss = self.calculate_validation_score()
-            validation_gate_loss_history.append(validation_gate_loss)
-            validation_depth_loss_history.append(validation_depth_loss)
+            validation_gate_loss_history = np.append(
+                validation_gate_loss_history, validation_gate_loss
+            )
+            validation_depth_loss_history = np.append(
+                validation_depth_loss_history, validation_depth_loss
+            )
             self.store_checkpoint(
                 epoch,
                 i,
@@ -267,11 +347,11 @@ class Trainer:
 
     def dump_loss_history(self, loss_history, gate_loss_history=None, depth_loss_history=None):
         file = f"{self.checkpoint_folder}/training_loss.npy"
-        np.save(file, np.array(loss_history))
+        np.save(file, (loss_history))
         if gate_loss_history is not None:
-            np.save(f"{self.checkpoint_folder}/gate_loss.npy", np.array(gate_loss_history))
+            np.save(f"{self.checkpoint_folder}/gate_loss.npy", (gate_loss_history))
         if depth_loss_history is not None:
-            np.save(f"{self.checkpoint_folder}/depth_loss.npy", np.array(depth_loss_history))
+            np.save(f"{self.checkpoint_folder}/depth_loss.npy", (depth_loss_history))
 
     def store_checkpoint(self, epoch, iter_idx, kwargs):
         data = {
@@ -348,7 +428,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     print(f"Args: {args}")
 
-    assert args.device == "qserver"
+    # assert args.device == "qserver"
     with open(args.param_file, "r") as f:
         param_dict = json.load(f)
     params = HyperParameters(param_dict)
@@ -381,11 +461,11 @@ if __name__ == "__main__":
     metadata["test_size"] = int(trainer.test_data.get_total_size())
     dump_metadata(model_output_folder, metadata)
 
-    tic = time.time()
-    loss = trainer.calculate_validation_score()
-    toc = time.time()
-    print(f"Initial validation loss = {loss} ({toc-tic} s)")
-    metadata["validation_time"] = toc - tic
+    # tic = time.time()
+    # loss = trainer.calculate_validation_score()
+    # toc = time.time()
+    # print(f"Initial validation loss = {loss} ({toc-tic} s)")
+    # metadata["validation_time"] = toc - tic
 
     tic = time.time()
     trainer.train(params)
