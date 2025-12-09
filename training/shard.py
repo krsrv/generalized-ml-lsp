@@ -37,10 +37,10 @@ class Sharder:
         Use only 1 file as input. Register the file as a member of the class.
         """
         self.data = np.load(file, "r")
-        total_size = 0
-        for key in self.data:
-            total_size += self.data[key].nbytes
-        print(f"Total size {total_size / (1 << 30):.4f} GB")
+        # total_size = 0
+        # for key in self.data:
+        #     total_size += self.data[key].nbytes
+        # print(f"Total size {total_size / (1 << 30):.4f} GB")
 
     def construct_metadata(self):
         """
@@ -132,21 +132,23 @@ if __name__ == "__main__":
     import argparse
     import os
 
-    parser = argparse.ArgumentParser(description="Convert C++ data output to ML training format")
+    parser = argparse.ArgumentParser(description="Shard given file")
     parser.add_argument(
-        "--filename", type=str, required=True, help="Input filename with npz extension"
+        "--input-filename", type=str, required=True, help="Input filename with npz extension"
     )
-    parser.add_argument("--folder", type=str, required=True, help="Ouptut folder without backslash")
+    parser.add_argument(
+        "--folder", type=str, required=True, help="Ouptut folder without forward slash"
+    )
     parser.add_argument("--prefix", type=str, required=True, help="Ouptut file prefix")
     args = parser.parse_args()
 
-    assert args.filename.endswith(".npz"), "Output filename must end with '.npz'"
-    assert not args.folder.endswith("/"), "Output folder should not end with backslash"
+    assert args.input_filename.endswith(".npz"), "Input filename must end with '.npz'"
+    assert not args.folder.endswith("/"), "Output folder should not end with forward slash"
 
-    sharder = Sharder(args.filename)
+    sharder = Sharder(args.input_filename)
 
     tic = time.time()
     print("Total size:", sharder.get_total_size())
     sharder.create_and_save_shards(args.folder, args.prefix)
     toc = time.time()
-    print(f"Sharded {args.filename} -> {args.folder}/{args.prefix} ({toc-tic} sec)")
+    print(f"Sharded {args.input_filename} -> {args.folder}/{args.prefix} ({toc-tic} sec)")
