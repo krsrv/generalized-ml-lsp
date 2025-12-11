@@ -1,5 +1,5 @@
 """
-Tools to split a given HDF5 file into training, test, validation (and potentially holdout)
+Tools to split given NPZ files into training, test, validation (and potentially holdout)
 """
 
 import os
@@ -45,31 +45,35 @@ class Splitter:
         "unprep_gate",
         "depth",
         "observation",
-        "layout",
-        "gates",
-        "gate_qubits",
-        "topology",
-        "gate_set_type",
+        "global_n_idx",
+        "global_g_idx",
     ]
     keyword_dtypes = [
         np.int32,
         np.int32,
         np.uint64,
-        np.bool_,
-        np.uint16,
-        np.uint16,
-        np.int32,
-        np.int32,
+        np.uint8,
+        np.uint8,
     ]
 
-    def __init__(self, files) -> None:
+    def __init__(self, files: list[str], seed: int = 1) -> None:
         self.data = []
+        total_file_size = sum([os.path.getsize(file) for file in files])
+        mem_limit = 15 * (1 << 30)  # 15 GB
+        if total_file_size < mem_limit:
+            print("Loading files in memory")
+        else:
+            print("Not loading files in memory")
         for file in files:
             if not file.endswith(".npz"):
                 continue
             # Note that if npz is in a compressed format, np.load
             # will return a lazy loader.
-            data = np.load(file)
+            if total_file_size < mem_limit:
+                with np.load(file, allow_pickle=False) as npzfile:
+                    data = {key: npzfile[key] for key in npzfile}
+            else:
+                data = np.load(file, allow_pickle=False)
             self.data.append(data)
 
         self.batch_size = None
@@ -77,18 +81,26 @@ class Splitter:
         self.validation_split = 0.15
         self.generate_metadata()
         self.hash_set = set()
+        self.seed = seed
+        self.rng = np.random.default_rng(seed)
 
     def generate_metadata(self) -> None:
         self.aggregate_metadata = {}  # (n, g) -> size
         self.per_file_metadata = {}  # (file_index, n, g) -> size
         self.reverse_map_file = {}  # (n, g) -> [file_indices]
         self.total_size = 0
-        for i, data in enumerate(self.data):
-            for j, key in enumerate(data.keys()):
-                # The key should be of the form n/g/{data}
-                assert len(key.split("/")) == 3
-                n, g, keyword = key.split("/")
+        self.global_data = {}
 
+        for i, data in enumerate(self.data):
+            for j, key in enumerate(data):
+                key_split = key.split("/")
+                if key_split[0] in ["global_g", "global_n", "seed"]:
+                    self.global_data[key] = data[key]
+                    continue
+
+                # The key should be of the form n/g/{data}
+                assert len(key_split) == 3
+                n, g, keyword = key_split
                 if (int(n), int(g)) not in self.aggregate_metadata:
                     self.aggregate_metadata[(int(n), int(g))] = 0
                     self.reverse_map_file[(int(n), int(g))] = []
@@ -126,7 +138,7 @@ class Splitter:
         )  # 10 * self.batch_size
         # Pick the batch indices corresponding for test dataset (from 0, ..., TB-1).
         buff_idxs = np.sort(
-            np.random.choice(
+            self.rng.choice(
                 np.arange(self.total_batches),
                 size // self.batch_size,
                 replace=False,
@@ -166,7 +178,7 @@ class Splitter:
         # Sample batch indices corresponding to each split. The sampling is
         # from (0, 1, ..., self.total_batches-1)
         shuffled_indices = np.arange(self.total_batches)
-        np.random.shuffle(shuffled_indices)
+        self.rng.shuffle(shuffled_indices)
         test_batch_indices = np.sort(
             shuffled_indices[: (self.test_size // self.batch_size)]
         )
@@ -222,7 +234,7 @@ class Splitter:
             print(f"Running {n}/{g} ({idx})")
 
             shuffled_indices = np.arange(self.aggregate_metadata[key])
-            np.random.shuffle(shuffled_indices)
+            self.rng.shuffle(shuffled_indices)
 
             # Create test data.
             test_size = self._get_sample_size(test_ng_idxs, test_ng_num_batches, idx)
@@ -326,7 +338,7 @@ class Splitter:
     @timeit
     def coalesce_files(self, folder: str, tmp_dir: str, file_prefix: str) -> None:
         """
-        Helper function to merge all splits in `_tmp` folder into a a single big folder.
+        Helper function to merge all splits in `_tmp` folder into a a single big file.
         """
         test_files, train_files, validation_files = [], [], []
         for file in os.listdir(f"{folder}/{tmp_dir}"):
@@ -357,6 +369,8 @@ class Splitter:
                                 data[keyword],
                             )
                         )
+            for key in self.global_data:
+                output[key] = self.global_data[key]
             np.savez_compressed(f"{folder}/{file_prefix}-{dataset}.npz", **output)
 
     def delete_temp_files(self, folder: str) -> None:
@@ -396,24 +410,22 @@ def calculate_hash(input):
 if __name__ == "__main__":
     import time
 
-    np.random.seed(1)
-
     splitter = Splitter(
         [
-            "training-data/compiled/2-10-new.npz",
-            # "training-data/compiled/2-5_20000.npz",
-            # "training-data/compiled/6-10_20000.npz",
-            # "training-data/compiled/11-14_20000.npz",
-            # "training-data/compiled/15-18_20000.npz",
-            # "training-data/compiled/19-20_20000.npz",
+            "training-data/big_data.npz",
         ]
     )
     print(f"Total size: {splitter.total_size}")
     splitter.set_batch_size(64)
-    prefix = ""
-    test_size, validation_size, train_size = splitter.generate_split(
-        "training-data/compiled", prefix
-    )
+    folder = "training-data/"
+    prefix = "data"
+    existing_splits = [
+        fname
+        for fname in os.listdir(folder)
+        if fname in [f"{prefix}-train.npz", f"{prefix}-test.npz", f"{prefix}-validation.npz"]
+    ]
+    assert not existing_splits, f"Splits for {folder}/{prefix} already exist: {existing_splits}"
+    test_size, validation_size, train_size = splitter.generate_split(folder, prefix)
     print(
         f"(Test, Validation, Train) size: ({test_size}, {validation_size}, {train_size})"
     )
