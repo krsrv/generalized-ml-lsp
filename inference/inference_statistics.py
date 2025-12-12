@@ -4,18 +4,9 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from inference.infer import InferWrapper, Path, is_1_qubit_gate
+from inference.infer import InferWrapper, is_1_qubit_gate
 from models.model_v0 import ModelV0
 from training.dataset import UnprepNpzDataloader
-
-"""
-Gate set:
-[
-    lsp::GateType::H,       lsp::GateType::S,  lsp::GateType::Sdg,
-    lsp::GateType::Z,       lsp::GateType::X,  lsp::GateType::sqrtX,
-    lsp::GateType::sqrtXdg, lsp::GateType::CX, lsp::GateType::CZ
-]
-"""
 
 
 def elapsed_str(elapsed_bot, elapsed_bob, curr_batch_idx, total_batches):
@@ -167,11 +158,11 @@ if __name__ == "__main__":
     parser.add_argument("--max-depth", type=int, default=10, required=True, help="Max depth")
     parser.add_argument("--batch-size", type=int, default=32, required=True, help="Batch size")
     parser.add_argument("--remove-duplicates", action="store_true", help="Remove duplicates")
+    parser.add_argument("--model-file", type=str, required=True, help="Model file")
+    parser.add_argument("--dataset", type=str, required=True, help="Dataset file")
     args = parser.parse_args()
     print(f"Args: {args}")
 
-    args.model_file = "output/model.pt"
-    args.dataset = "training-data/validation.npz"
     parent_dir = os.path.dirname(args.model_file)
     args.output_file = os.path.join(
         parent_dir,
