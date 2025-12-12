@@ -1,6 +1,7 @@
+import json
 import os
 import time
-from argparse import Namespace
+from argparse import ArgumentParser, Namespace
 
 import numpy as np
 import torch
@@ -11,17 +12,20 @@ from models.model_v0 import ModelV0
 from training.dataset import ShardReader, UnprepNpzDataloader
 
 
-def elapsed_str(elapsed_bot, elapsed_bob, curr_batch_idx, total_batches, epoch_idx):
-    avg_time = elapsed_bot / (curr_batch_idx + 1) if curr_batch_idx > 0 else 0
-    remaining_batches = total_batches - (curr_batch_idx + 1)
+def elapsed_str(elapsed_total, elapsed_last, curr_idx, total_batches, epoch_idx):
+    avg_time = elapsed_total / (curr_idx + 1) if curr_idx > 0 else 0
+    remaining_batches = total_batches - (curr_idx + 1)
     est_remaining = avg_time * remaining_batches
     if est_remaining < 60:
         est_str = f"{est_remaining:.2f} seconds"
     elif est_remaining < 3600:
-        est_str = f"{est_remaining/60:.2f} minutes"
+        est_str = f"{est_remaining / 60:.2f} minutes"
     else:
-        est_str = f"{est_remaining/3600:.2f} hours"
-    return f"Iterated over {curr_batch_idx} batchs, {epoch_idx} epochs ({elapsed_bob} s)| Avg time: {avg_time:.7f} s/batch | Estimated time left for epoch: {est_str}"
+        est_str = f"{est_remaining / 3600:.2f} hours"
+    return (
+        f"Iterated over {curr_idx} batches, {epoch_idx} epochs ({elapsed_last:.1f} s) | "
+        f"Avg time: {avg_time:.7f} s/batch | Estimated time left for epoch: {est_str}"
+    )
 
 
 def normalize_depth(val, n, old: bool = False):
@@ -43,50 +47,50 @@ def unnormalize_depth(val, n, old: bool = False):
 class HyperParameters:
     def __init__(self, params: dict):
         self.params = params
-        self.load_defaults()
+        self._set_defaults()
 
-    def _update_if_not_set(self, key: str, default):
-        if key not in self.params:
-            self.params[key] = default
+    def _set_defaults(self):
+        defaults = {
+            "model/dA": 128,
+            "model/dB": 32,
+            "model/dC": 64,
+            "model/dD": 32,
+            "model/dE": 32,
+            "model/num_transformer_blocks": 2,
+            "model/homo_attention_n_head": 4,
+            "model/hetero_attention_embed_dim": 100,
+            "model/hetero_attention_n_head": 4,
+            "trainer/schedule": "naive",
+            "trainer/schedule/epochs": 1,
+            "trainer/batch_size": 32,
+            "trainer/adam/lr": 0.001,
+            "trainer/adam/betas": (0.9, 0.999),
+        }
+        for key, value in defaults.items():
+            self.params.setdefault(key, value)
 
-    def load_defaults(self):
-        self._update_if_not_set("model/dA", 128)
-        self._update_if_not_set("model/dB", 32)
-        self._update_if_not_set("model/dC", 64)
-        self._update_if_not_set("model/dD", 32)
-        self._update_if_not_set("model/dE", 32)
-        self._update_if_not_set("model/num_transformer_blocks", 2)
-        self._update_if_not_set("model/homo_attention_n_head", 4)
-        self._update_if_not_set("model/hetero_attention_embed_dim", 100)
-        self._update_if_not_set("model/hetero_attention_n_head", 4)
-
-        self._update_if_not_set("trainer/schedule", "naive")
-        self._update_if_not_set("trainer/schedule/epochs", 1)
-        # self._update_if_not_set("trainer/schedule/datapoints", 1)
-        self._update_if_not_set("trainer/batch_size", 32)
-        self._update_if_not_set("trainer/adam/lr", 0.001)
-        self._update_if_not_set("trainer/adam/betas", (0.9, 0.999))
-
-        assert "trainer/train_file" in self.params
-        assert "trainer/validation_file" in self.params
-        assert "trainer/test_file" in self.params
+        required = ["trainer/train_file", "trainer/validation_file", "trainer/test_file"]
+        for req in required:
+            assert req in self.params, f"Missing required parameter: {req}"
 
     def __getitem__(self, key):
         return self.params[key]
 
 
 class ModelWrapper:
-    def __init__(self, hyperparams: HyperParameters) -> None:
-        self.model: nn.Module = ModelV0(
-            hyperparams.params["model/dA"],
-            hyperparams.params["model/dB"],
-            hyperparams.params["model/dC"],
-            hyperparams.params["model/dD"],
-            hyperparams.params["model/dE"],
-            num_transformer_blocks=hyperparams.params["model/num_transformer_blocks"],
-            homo_attention_n_head=hyperparams.params["model/homo_attention_n_head"],
-            hetero_attention_embed_dim=hyperparams.params["model/hetero_attention_embed_dim"],
-            hetero_attention_n_head=hyperparams.params["model/hetero_attention_n_head"],
+
+    def __init__(self, hyperparams: HyperParameters):
+        hp = hyperparams.params
+        self.model = ModelV0(
+            hp["model/dA"],
+            hp["model/dB"],
+            hp["model/dC"],
+            hp["model/dD"],
+            hp["model/dE"],
+            num_transformer_blocks=hp["model/num_transformer_blocks"],
+            homo_attention_n_head=hp["model/homo_attention_n_head"],
+            hetero_attention_embed_dim=hp["model/hetero_attention_embed_dim"],
+            hetero_attention_n_head=hp["model/hetero_attention_n_head"],
         )
         print("Model details:")
         print(f"# parameters = {self.count_parameters()}")
@@ -96,45 +100,40 @@ class ModelWrapper:
 
 
 class Trainer:
+
     def __init__(
         self, model_wrapper: ModelWrapper, hyperparams: HyperParameters, output_folder: str
-    ) -> None:
+    ):
         self.model = model_wrapper.model
+        hp = hyperparams.params
 
-        assert hyperparams.params["trainer/schedule"] == "naive"
+        assert hp["trainer/schedule"] == "naive"
         self.optimizer = optim.Adam(
             self.model.parameters(),
-            lr=hyperparams.params["trainer/adam/lr"],
-            betas=hyperparams.params["trainer/adam/betas"],
+            lr=hp["trainer/adam/lr"],
+            betas=hp["trainer/adam/betas"],
         )
         print(f"Optimizer: {self.optimizer.__class__.__name__}")
 
-        train_folder = hyperparams.params["trainer/train_file"]
-        # self.train_data = ShardReader([train_folder + "/" + f for f in os.listdir(train_folder)])
-        self.train_data = UnprepNpzDataloader(
-            hyperparams.params["trainer/train_file"], shuffle=True
-        )
-        self.validation_data = UnprepNpzDataloader(
-            hyperparams.params["trainer/validation_file"], shuffle=False
-        )
-        self.test_data = UnprepNpzDataloader(
-            hyperparams.params["trainer/test_file"], shuffle=False, mload=False
-        )
+        self.train_data = UnprepNpzDataloader(hp["trainer/train_file"], shuffle=True)
+        self.validation_data = UnprepNpzDataloader(hp["trainer/validation_file"], shuffle=False)
+        self.test_data = UnprepNpzDataloader(hp["trainer/test_file"], shuffle=False, mload=False)
+
         print("Total sizes of datasets:")
         print(f"Train - {self.train_data.get_total_size()}")
         print(f"Validation - {self.validation_data.get_total_size()}")
         print(f"Test - {self.test_data.get_total_size()}")
 
-        self.batch_size = hyperparams.params["trainer/batch_size"]
-        self.train_data.set_batch_size(self.batch_size)
-        self.validation_data.set_batch_size(self.batch_size)
-        self.test_data.set_batch_size(self.batch_size)
+        batch_size = hp["trainer/batch_size"]
+        for data_loader in [self.train_data, self.validation_data, self.test_data]:
+            data_loader.set_batch_size(batch_size)
 
         self.gate_loss = nn.CrossEntropyLoss()
         self.depth_loss = nn.MSELoss()
         self.alpha = 1
-
         self.checkpoint_folder = output_folder
+        self.device = None
+        self.epoch_offset = 0
 
     def _get_checkpoint_mod(self, num_batches: int):
         # Checkpoint 10 times per epoch
@@ -146,18 +145,17 @@ class Trainer:
         return 1000
         return int(np.ceil(num_batches / 1000.0)) * 1000 // 50
 
-    def compute_loss(
-        self, n, gate_prediction, depth_prediction, true_gates, true_depth
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        return self.gate_loss(gate_prediction, true_gates), self.alpha * (
-            self.depth_loss(depth_prediction, normalize_depth(true_depth.float(), n))
-        )
+    def compute_loss(self, n, gate_pred, depth_pred, true_gates, true_depth):
+        gate_loss = self.gate_loss(gate_pred, true_gates)
+        depth_norm = normalize_depth(true_depth.float(), n)
+        depth_loss = self.depth_loss(depth_pred, depth_norm) * self.alpha
+        return gate_loss, depth_loss
 
     def run_model(self, data, use_grad=True, use_eval=False):
         with torch.set_grad_enabled(use_grad):
             if use_eval:
                 self.model.eval()
-            gate_prediction, depth_prediction = self.model.forward(
+            gate_pred, depth_pred = self.model(
                 torch.tensor(data["eigval"], dtype=torch.float).to(self.device),
                 torch.tensor(data["eigvec"], dtype=torch.float).to(self.device),
                 torch.tensor(data["gates"], dtype=torch.long).to(self.device),
@@ -166,43 +164,35 @@ class Trainer:
             )
             if use_eval:
                 self.model.train()
-        return gate_prediction, depth_prediction
+        return gate_pred, depth_pred
 
     def set_device(self):
-        if hasattr(self, "device") and self.device is not None:
+        if self.device is not None:
             return
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.model.to(self.device)
         print(f"Model now on device={self.device}")
 
-    def load_loss_history(self, params: HyperParameters) -> list[np.ndarray]:
+    def load_loss_history(self, params: HyperParameters):
         def load_default(key, dic, default, file):
             if key in dic:
                 return dic[key]
-            else:
-                assert not os.path.exists(
-                    file
-                ), f"Loss file {file} already exists. Rename before proceeding."
-                return default
+            assert not os.path.exists(
+                file
+            ), f"Loss file {file} already exists. Rename before proceeding."
+            return default
 
         base_dir = os.path.basename(params["model_file"]) if "model_file" in params.params else ""
-        train_gate_loss_history = load_default(
+        gate_hist = load_default(
             "train_gate_loss_history", params.params, np.array([]), f"{base_dir}/gate_loss.npy"
         )
-        train_depth_loss_history = load_default(
+        depth_hist = load_default(
             "train_depth_loss_history", params.params, np.array([]), f"{base_dir}/depth_loss.npy"
         )
-        training_loss_history = load_default(
+        loss_hist = load_default(
             "training_loss_history", params.params, np.array([]), f"{base_dir}/training_loss.npy"
         )
-
-        return (
-            train_gate_loss_history,
-            train_depth_loss_history,
-            training_loss_history,
-            [],
-            [],
-        )
+        return gate_hist, depth_hist, loss_hist, [], []
 
     def load_checkpoint(self, params: HyperParameters):
         self.epoch_offset = 0
@@ -214,19 +204,15 @@ class Trainer:
             self.epoch_offset = saved_data["epoch"]
 
     def train(self, params: HyperParameters):
-        (
-            train_gate_loss_history,
-            train_depth_loss_history,
-            training_loss_history,
-            validation_gate_loss_history,
-            validation_depth_loss_history,
-        ) = self.load_loss_history(params)
+        train_gate_hist, train_depth_hist, loss_hist, val_gate_hist, val_depth_hist = (
+            self.load_loss_history(params)
+        )
         self.load_checkpoint(params)
         self.set_device()
 
-        num_batches = self.train_data.get_total_size() / self.train_data.batch_size
-        checkpoint_mod = self._get_checkpoint_mod(num_batches)
-        loss_history_mod = self._get_history_mod(num_batches)
+        train_batches = self.train_data.get_total_size() / self.train_data.batch_size
+        checkpoint_mod = self._get_checkpoint_mod(train_batches)
+        loss_history_mod = self._get_history_mod(train_batches)
         print(
             f"Loss history and checkpoints will be stored every {loss_history_mod} and {checkpoint_mod} iterations respectively."
         )
@@ -237,163 +223,138 @@ class Trainer:
         ):
             epoch_tic = time.time()
             batch_tic = time.time()
-            for i, train_data in enumerate(iter(self.train_data)):
-                n = train_data["eigval"].shape[1]
+            for i, data in enumerate(self.train_data):
+                n = data["eigval"].shape[1]
                 self.optimizer.zero_grad()
-                gate_prediction, depth_prediction = self.run_model(train_data)
+                gate_pred, depth_pred = self.run_model(data)
                 gate_loss, depth_loss = self.compute_loss(
                     n,
-                    gate_prediction,
-                    depth_prediction,
-                    torch.tensor(train_data["unprep_gate"], dtype=torch.int64).to(self.device),
-                    torch.tensor(train_data["depth"], dtype=torch.int64).to(self.device),
+                    gate_pred,
+                    depth_pred,
+                    torch.tensor(data["unprep_gate"], dtype=torch.int64).to(self.device),
+                    torch.tensor(data["depth"], dtype=torch.int64).to(self.device),
                 )
                 loss = gate_loss + depth_loss
                 loss.backward()
                 self.optimizer.step()
 
-                training_loss_history = np.append(training_loss_history, loss.detach().cpu().item())
-                train_gate_loss_history = np.append(
-                    train_gate_loss_history, gate_loss.detach().cpu().item()
-                )
-                train_depth_loss_history = np.append(
-                    train_depth_loss_history, depth_loss.detach().cpu().item()
-                )
+                loss_hist = np.append(loss_hist, loss.detach().cpu().item())
+                train_gate_hist = np.append(train_gate_hist, gate_loss.detach().cpu().item())
+                train_depth_hist = np.append(train_depth_hist, depth_loss.detach().cpu().item())
 
                 if i % 1000 == 0:
                     print(
                         elapsed_str(
-                            time.time() - epoch_tic, time.time() - batch_tic, i, num_batches, epoch
+                            time.time() - epoch_tic,
+                            time.time() - batch_tic,
+                            i,
+                            train_batches,
+                            epoch,
                         )
                     )
                     batch_tic = time.time()
 
                 if i % loss_history_mod == 0:
-                    self.dump_loss_history(
-                        training_loss_history,
-                        train_gate_loss_history,
-                        train_depth_loss_history,
-                    )
+                    self.dump_loss_history(loss_hist, train_gate_hist, train_depth_hist)
 
                 if i % checkpoint_mod == 0 and i > 0:
-                    validation_gate_loss, validation_depth_loss = self.calculate_validation_score()
-                    validation_gate_loss_history = np.append(
-                        validation_gate_loss_history, validation_gate_loss
-                    )
-                    validation_depth_loss_history = np.append(
-                        validation_depth_loss_history, validation_depth_loss
-                    )
+                    val_gate_loss, val_depth_loss = self.calculate_validation_score()
+                    val_gate_hist = np.append(val_gate_hist, val_gate_loss)
+                    val_depth_hist = np.append(val_depth_hist, val_depth_loss)
                     self.store_checkpoint(
                         epoch,
                         i,
                         {
-                            "train_gate_loss": train_gate_loss_history[-1],
-                            "train_depth_loss": train_depth_loss_history[-1],
-                            "validation_gate_loss": validation_gate_loss_history[-1],
-                            "validation_depth_loss": validation_depth_loss_history[-1],
+                            "train_gate_loss": train_gate_hist[-1],
+                            "train_depth_loss": train_depth_hist[-1],
+                            "validation_gate_loss": val_gate_hist[-1],
+                            "validation_depth_loss": val_depth_hist[-1],
                         },
                     )
 
-            # Also store at the end of the model
-            validation_gate_loss, validation_depth_loss = self.calculate_validation_score()
-            validation_gate_loss_history = np.append(
-                validation_gate_loss_history, validation_gate_loss
-            )
-            validation_depth_loss_history = np.append(
-                validation_depth_loss_history, validation_depth_loss
-            )
+            # Store at end of epoch
+            val_gate_loss, val_depth_loss = self.calculate_validation_score()
+            val_gate_hist = np.append(val_gate_hist, val_gate_loss)
+            val_depth_hist = np.append(val_depth_hist, val_depth_loss)
             self.store_checkpoint(
                 epoch,
                 i,
                 {
-                    "train_gate_loss": train_gate_loss_history[-1],
-                    "train_depth_loss": train_depth_loss_history[-1],
-                    "validation_gate_loss": validation_gate_loss_history[-1],
-                    "validation_depth_loss": validation_depth_loss_history[-1],
+                    "train_gate_loss": train_gate_hist[-1],
+                    "train_depth_loss": train_depth_hist[-1],
+                    "validation_gate_loss": val_gate_hist[-1],
+                    "validation_depth_loss": val_depth_hist[-1],
                 },
             )
-            self.dump_loss_history(
-                training_loss_history, train_gate_loss_history, train_depth_loss_history
-            )
+            self.dump_loss_history(loss_hist, train_gate_hist, train_depth_hist)
 
-    def evaluate_model(self, dataset) -> torch.Tensor:
+    def evaluate_model(self, dataset):
         self.set_device()
-        total_loss, total_gate_loss, total_depth_loss = 0.0, 0.0, 0.0
-        total_samples = 0
-        for i, data in enumerate(iter(dataset)):
-            gate_prediction, depth_prediction = self.run_model(data, use_grad=False, use_eval=True)
+        total_gate_loss = total_depth_loss = total_samples = 0.0
+        for data in dataset:
+            gate_pred, depth_pred = self.run_model(data, use_grad=False, use_eval=True)
             n = data["eigval"].shape[-1]
             gate_loss, depth_loss = self.compute_loss(
                 n,
-                gate_prediction,
-                depth_prediction,
+                gate_pred,
+                depth_pred,
                 torch.tensor(data["unprep_gate"], dtype=torch.int64).to(self.device),
                 torch.tensor(data["depth"], dtype=torch.int64).to(self.device),
             )
-            loss = gate_loss + depth_loss
             batch_size = data["unprep_gate"].shape[0]
-            total_loss += loss.cpu().item() * batch_size
             total_gate_loss += gate_loss.cpu().item() * batch_size
             total_depth_loss += depth_loss.cpu().item() * batch_size
             total_samples += batch_size
-        # average_loss = total_loss / total_samples
         return total_gate_loss / total_samples, total_depth_loss / total_samples
 
-    def calculate_validation_score(self) -> torch.Tensor:
+    def calculate_validation_score(self):
         return self.evaluate_model(self.validation_data)
 
-    def calculate_test_score(self) -> torch.Tensor:
+    def calculate_test_score(self):
         return self.evaluate_model(self.test_data)
 
     def dump_loss_history(self, loss_history, gate_loss_history=None, depth_loss_history=None):
-        file = f"{self.checkpoint_folder}/training_loss.npy"
-        np.save(file, (loss_history))
+        np.save(f"{self.checkpoint_folder}/training_loss.npy", loss_history)
         if gate_loss_history is not None:
-            np.save(f"{self.checkpoint_folder}/gate_loss.npy", (gate_loss_history))
+            np.save(f"{self.checkpoint_folder}/gate_loss.npy", gate_loss_history)
         if depth_loss_history is not None:
-            np.save(f"{self.checkpoint_folder}/depth_loss.npy", (depth_loss_history))
+            np.save(f"{self.checkpoint_folder}/depth_loss.npy", depth_loss_history)
 
-    def store_checkpoint(self, epoch, iter_idx, kwargs):
+    def store_checkpoint(self, epoch, iter_idx, stats):
         data = {
             "epoch": epoch,
             "iter_idx": iter_idx,
             "model_state_dict": self.model.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
+            **stats,
         }
-        data.update(kwargs)
-        torch.save(
-            data,
-            f"{self.checkpoint_folder}/model-{epoch}-{iter_idx}.pt",
-        )
+        torch.save(data, f"{self.checkpoint_folder}/model-{epoch}-{iter_idx}.pt")
 
 
 def create_new_folder(prefix: str, args: Namespace):
     name = f"{args.prefix}-{args.suffix}"
-    folder = f"{prefix}/{name}"
-    if not os.path.exists(folder):
-        os.mkdir(folder)
+    folder = os.path.join(prefix, name)
+    os.makedirs(folder, exist_ok=True)
     return folder
 
 
 def update_metadata_with_args(args: Namespace, metadata: dict):
-    metadata["args"] = {}
-    for key, value in args._get_kwargs():
-        metadata["args"][key] = value
+    metadata["args"] = dict(args._get_kwargs())
 
 
 def update_metadata_with_system(metadata: dict):
-    metadata["cpu_count"] = [os.cpu_count()]
+    metadata["cpu_count"] = os.cpu_count()
     if torch.cuda.is_available():
-        metadata["gpu_count"] = torch.cuda.device_count()
+        gpu_count = torch.cuda.device_count()
+        metadata["gpu_count"] = gpu_count
         metadata["gpu"] = []
-        for i in range(metadata["gpu_count"]):
-            gpu_name = torch.cuda.get_device_name(i)
-            gpu_properties = torch.cuda.get_device_properties(i)
+        for i in range(gpu_count):
+            props = torch.cuda.get_device_properties(i)
             metadata["gpu"].append(
                 {
-                    "name": gpu_name,
-                    "memory": gpu_properties.total_memory / (1024**3),
-                    "multi_processor_count": gpu_properties.multi_processor_count,
+                    "name": torch.cuda.get_device_name(i),
+                    "memory": props.total_memory / (1024**3),
+                    "multi_processor_count": props.multi_processor_count,
                 }
             )
 
@@ -407,18 +368,12 @@ def update_metadata_with_params(hyperparams: HyperParameters, metadata: dict):
 
 
 def dump_metadata(folder: str, metadata: dict):
-    import json
-
-    with open(f"{folder}/metadata.json", "w") as f:
-        json.dump(metadata, f)
+    with open(os.path.join(folder, "metadata.json"), "w") as f:
+        json.dump(metadata, f, indent=2)
 
 
-if __name__ == "__main__":
-    # INSERT_YOUR_CODE
-    import argparse
-    import json
-
-    parser = argparse.ArgumentParser(description="Trainer hyperparameters")
+def main():
+    parser = ArgumentParser(description="Trainer hyperparameters")
     parser.add_argument(
         "--param-file", type=str, required=True, help="json file for loading params"
     )
@@ -428,38 +383,43 @@ if __name__ == "__main__":
     args = parser.parse_args()
     print(f"Args: {args}")
 
-    # assert args.device == "qserver"
     with open(args.param_file, "r") as f:
         param_dict = json.load(f)
     params = HyperParameters(param_dict)
+
+    # Attach dataset paths to args for folder naming
     args.train_file = params["trainer/train_file"]
     args.validation_file = params["trainer/validation_file"]
     args.test_file = params["trainer/test_file"]
-    model_output_folder = create_new_folder("output", args)
-    print(f"Output folder: {model_output_folder}")
 
-    seed = 1  # time.time_ns()
+    output_folder = create_new_folder("output", args)
+    print(f"Output folder: {output_folder}")
+
+    # Set global seeds for reproducibility
+    seed = 1
     np.random.seed(seed)
-    # Torch RNG
-    gen = torch.Generator()
-    gen.manual_seed(seed)
+    torch.manual_seed(seed)
 
     model = ModelWrapper(params)
-    trainer = Trainer(model, params, model_output_folder)
+    trainer = Trainer(model, params, output_folder)
 
     metadata = {}
     update_metadata_with_args(args, metadata)
     update_metadata_with_system(metadata)
     update_metadata_with_model(model, metadata)
     update_metadata_with_params(params, metadata)
-
-    metadata["validation_size"] = int(trainer.validation_data.get_total_size())
-    metadata["train_size"] = int(trainer.train_data.get_total_size())
-    metadata["train_batches"] = int(
-        trainer.train_data.get_total_size() // trainer.train_data.batch_size
+    metadata.update(
+        {
+            "validation_size": int(trainer.validation_data.get_total_size()),
+            "train_size": int(trainer.train_data.get_total_size()),
+            "train_batches": int(
+                trainer.train_data.get_total_size() // trainer.train_data.batch_size
+            ),
+            "test_size": int(trainer.test_data.get_total_size()),
+        }
     )
     metadata["test_size"] = int(trainer.test_data.get_total_size())
-    dump_metadata(model_output_folder, metadata)
+    dump_metadata(output_folder, metadata)
 
     # tic = time.time()
     # loss = trainer.calculate_validation_score()
@@ -470,15 +430,17 @@ if __name__ == "__main__":
     tic = time.time()
     trainer.train(params)
     toc = time.time()
-    print(f"Training complete ({toc-tic} s)")
+    print(f"Training complete ({toc-tic:.1f} s)")
     metadata["train_time"] = toc - tic
 
+    # Uncomment below to evaluate on test set after training and update metadata
     # tic = time.time()
     # gate_loss, depth_loss = trainer.calculate_test_score()
-    # loss = gate_loss + depth_loss
-    # toc = time.time()
-    # print(f"Test loss = {loss} ({toc-tic} s)")
-    # metadata["test_time"] = toc - tic
-    # metadata["test_loss"] = loss
+    # metadata["test_time"] = time.time() - tic
+    # metadata["test_loss"] = gate_loss + depth_loss
 
-    dump_metadata(model_output_folder, metadata)
+    dump_metadata(output_folder, metadata)
+
+
+if __name__ == "__main__":
+    main()
