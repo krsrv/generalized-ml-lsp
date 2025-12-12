@@ -30,6 +30,7 @@ def run_inference(
     batch_size: int,
     beam_width: int,
     remove_duplicates: bool = False,
+    compile: bool = False,
 ):
     model = ModelV0(
         128,
@@ -39,11 +40,7 @@ def run_inference(
         32,
         hetero_attention_embed_dim=100,
     )
-    wrapper = InferWrapper(
-        model,
-        model_file,
-        max_depth,
-    )
+    wrapper = InferWrapper(model, model_file, max_depth, compile=compile)
 
     full_dataset = UnprepNpzDataloader(dataset_file, shuffle=True)
 
@@ -160,13 +157,15 @@ if __name__ == "__main__":
     parser.add_argument("--remove-duplicates", action="store_true", help="Remove duplicates")
     parser.add_argument("--model-file", type=str, required=True, help="Model file")
     parser.add_argument("--dataset", type=str, required=True, help="Dataset file")
+    parser.add_argument("--expid", type=str, help="Experiment ID")
+    parser.add_argument("--compile", action="store_true", help="Use torch compile")
     args = parser.parse_args()
     print(f"Args: {args}")
 
     parent_dir = os.path.dirname(args.model_file)
     args.output_file = os.path.join(
         parent_dir,
-        f"parallel-inference-bw-{args.beam_width}-md-{args.max_depth}-bs-{args.batch_size}-{'wo' if args.remove_duplicates else 'w'}-duplicate.npz",
+        f"parallel-inference-bw-{args.beam_width}-md-{args.max_depth}-bs-{args.batch_size}-{'wo' if args.remove_duplicates else 'w'}-duplicate-{args.expid}.npz",
     )
     print(f"Output file: {args.output_file}")
 
@@ -181,4 +180,5 @@ if __name__ == "__main__":
         args.batch_size,
         args.beam_width,
         args.remove_duplicates,
+        compile=args.compile,
     )

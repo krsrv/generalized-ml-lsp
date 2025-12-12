@@ -578,7 +578,7 @@ class InferWrapper:
     depth setting, and utilizes beam search.
     """
 
-    def __init__(self, model: nn.Module, file: str, max_depth=20):
+    def __init__(self, model: nn.Module, file: str, max_depth: int = 20, compile: bool = True):
         super().__init__()
         self.max_depth = max_depth
         self.beam_width = 1
@@ -589,6 +589,8 @@ class InferWrapper:
             saved_data = torch.load(file, map_location="cpu", weights_only=True)
             self.model.load_state_dict(saved_data["model_state_dict"])
         self.model.eval()
+        if compile:
+            self.model.compile()
 
         self._set_device()
 
