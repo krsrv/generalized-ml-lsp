@@ -102,9 +102,15 @@ class ModelWrapper:
 class Trainer:
 
     def __init__(
-        self, model_wrapper: ModelWrapper, hyperparams: HyperParameters, output_folder: str
+        self,
+        model_wrapper: ModelWrapper,
+        hyperparams: HyperParameters,
+        output_folder: str,
+        compile: bool = False,
     ):
         self.model = model_wrapper.model
+        if compile:
+            self.model.compile()
         hp = hyperparams.params
 
         assert hp["trainer/schedule"] == "naive"
@@ -136,14 +142,12 @@ class Trainer:
         self.epoch_offset = 0
 
     def _get_checkpoint_mod(self, num_batches: int):
-        # Checkpoint 10 times per epoch
-        return 1000
-        return int(np.ceil(num_batches / 1000.0)) * 1000 // 10
+        # Checkpoint 2 times per epoch
+        return int(np.ceil(num_batches / 2))
 
     def _get_history_mod(self, num_batches: int):
-        # Checkpoint 50 times per epoch
+        # Checkpoint every 1000 batches
         return 1000
-        return int(np.ceil(num_batches / 1000.0)) * 1000 // 50
 
     def compute_loss(self, n, gate_pred, depth_pred, true_gates, true_depth):
         gate_loss = self.gate_loss(gate_pred, true_gates)
@@ -332,7 +336,7 @@ class Trainer:
 
 
 def create_new_folder(prefix: str, args: Namespace):
-    name = f"{args.prefix}-{args.suffix}"
+    name = f"{args.prefix}-{args.expid}"
     folder = os.path.join(prefix, name)
     os.makedirs(folder, exist_ok=True)
     return folder
@@ -377,9 +381,9 @@ def main():
     parser.add_argument(
         "--param-file", type=str, required=True, help="json file for loading params"
     )
-    parser.add_argument("--suffix", type=str, default="", help="Name suffix for folder")
     parser.add_argument("--prefix", type=str, default="", help="Name prefix for folder")
-    parser.add_argument("--device", type=str, default="hpc", help="Name suffix for folder")
+    parser.add_argument("--expid", type=str, default="", help="Name suffix for folder")
+    parser.add_argument("--compile", action="store_true", help="Use torch compile")
     args = parser.parse_args()
     print(f"Args: {args}")
 
@@ -401,7 +405,7 @@ def main():
     torch.manual_seed(seed)
 
     model = ModelWrapper(params)
-    trainer = Trainer(model, params, output_folder)
+    trainer = Trainer(model, params, output_folder, compile=args.compile)
 
     metadata = {}
     update_metadata_with_args(args, metadata)
