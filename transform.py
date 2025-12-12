@@ -255,12 +255,26 @@ class UnprepDataCompiler:
             counter += 1
             print(f"Completed dataset sampling for {n}/{g} ({counter} out of {len(n_g)})")
         # Add global n, g data
-        for n, n_data in global_n_data.items():
-            for k, v in n_data.items():
-                dump_data[f"global_n/{n}/{k}"] = np.array(v)
-        for g, g_data in global_g_data.items():
-            for k, v in g_data.items():
-                dump_data[f"global_g/{g}/{k}"] = np.array(v)
+        ng_dtypes = {
+            "layout": np.bool_,
+            "topology": np.uint8,
+            "gates": np.uint8,
+            "gate_qubits": np.uint8,
+            "gate_set_type": np.uint8,
+        }
+        for label, data_in in [("n", global_n_data), ("g", global_g_data)]:
+            for i, i_data in data_in.items():
+                for k, v in i_data.items():
+                    v = np.array(v)
+                    dtype = ng_dtypes[k]
+                    if dtype == np.bool_:
+                        assert np.all((v == 0) | (v == 1))
+                    elif np.issubdtype(dtype, np.integer):
+                        info = np.iinfo(dtype)
+                        assert np.all(info.min <= v) and np.all(v < info.max)
+                    else:
+                        raise ValueError(f"Unknown dtype {dtype} for key {k}")
+                    dump_data[f"global_{label}/{i}/{k}"] = v.astype(dtype)
         dump_data["seed"] = self.seed
         print(f"Saving data")
         np.savez(f"{filename}.npz", **dump_data)
@@ -274,15 +288,15 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Convert C++ data output to ML training format")
     parser.add_argument(
-        "--filename", type=str, required=True,
+        "--output_filename", type=str, required=True,
         help="Output filename, without npz extension")
     parser.add_argument("--folder", type=str, required=True, help="Input folder")
     args = parser.parse_args()
 
-    assert not args.filename.endswith(".npz"), (
+    assert not args.output_filename.endswith(".npz"), (
         "Output filename must not end with '.npz'")
-    base_dir = os.path.dirname(args.filename)
-    base_filename = os.path.basename(args.filename)
+    base_dir = os.path.dirname(args.output_filename)
+    base_filename = os.path.basename(args.output_filename)
     existing_fragments = [
         fname
         for fname in os.listdir(base_dir)
