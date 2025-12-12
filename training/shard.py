@@ -14,21 +14,17 @@ class Sharder:
         "unprep_gate",
         "depth",
         "observation",
-        "layout",
-        "gates",
-        "gate_qubits",
-        "topology",
-        "gate_set_type",
+        "global_n_idx",
+        "global_g_idx",
     ]
 
-    def __init__(self, file: str, shard_size: int = 1 << 20, rng: np.random.Generator = None):
+    def __init__(self, file: str, shard_size: int = 1 << 20, seed: int = 1):
         super().__init__()
         self.load_file(file)
+        self.global_data = {}
         self.construct_metadata()
-        if rng is None:
-            self.rng = np.random.default_rng()
-        else:
-            self.rng = rng
+        self.seed = seed
+        self.rng = np.random.default_rng(seed)
         self.shard_size = shard_size
         self.batch_size = 1 << 10
 
@@ -54,7 +50,11 @@ class Sharder:
         self.reverse_map = {}
         total = 0
         data = self.data
-        for key in data.keys():
+        for key in data:
+            key_split = key.split("/")
+            if key_split[0] in ["global_g", "global_n", "seed"]:
+                self.global_data[key] = data[key]
+                continue
             if not key.endswith("unprep_gate"):
                 continue
             size = data[key].shape[0]
@@ -86,10 +86,16 @@ class Sharder:
         np.random.shuffle(self.iter_order)
         return self
 
+    def _init_new_shard(self):
+        shard = {}
+        for key in self.global_data:
+            shard[key] = self.global_data[key]
+        return shard
+
     def create_and_save_shards(self, folder, prefix):
         self._create_iter_order()
         curr_size = 0
-        sharded_data = {}
+        sharded_data = self._init_new_shard()
         shard_count = 0
         batch_tic = tic = time.time()
         print(f"Total # iterations = {len(self.iter_order)}")
@@ -109,7 +115,7 @@ class Sharder:
                     )
             if curr_size >= self.shard_size:
                 np.savez_compressed(f"{folder}/{prefix}-s{shard_count}.npz", **sharded_data)
-                sharded_data = {}
+                sharded_data = self._init_new_shard()
                 shard_count += 1
                 curr_size = 0
                 print(f"Saved shard #{shard_count}")
@@ -122,7 +128,6 @@ class Sharder:
 
         if len(sharded_data) > 0:
             np.savez_compressed(f"{folder}/{prefix}-s{shard_count}.npz", **sharded_data)
-            sharded_data = {}
             shard_count += 1
 
         print(f"Created {shard_count} shards.")
