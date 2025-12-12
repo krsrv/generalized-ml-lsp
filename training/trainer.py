@@ -110,10 +110,10 @@ class Trainer:
         print(f"Optimizer: {self.optimizer.__class__.__name__}")
 
         train_folder = hyperparams.params["trainer/train_file"]
-        self.train_data = ShardReader([train_folder + "/" + f for f in os.listdir(train_folder)])
-        # UnprepNpzDataloader(
-        #     hyperparams.params["trainer/train_file"], shuffle=True
-        # )
+        # self.train_data = ShardReader([train_folder + "/" + f for f in os.listdir(train_folder)])
+        self.train_data = UnprepNpzDataloader(
+            hyperparams.params["trainer/train_file"], shuffle=True
+        )
         self.validation_data = UnprepNpzDataloader(
             hyperparams.params["trainer/validation_file"], shuffle=False
         )

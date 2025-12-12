@@ -16,7 +16,7 @@ def transform_graph(adjacency_matrix):
     different layout.
     """
     dim = len(adjacency_matrix.shape)
-    assert dim == 2 or dim == 3
+    assert dim == 2 or dim == 3, f"Expected dimension 2 or 3 for adjacency matrix, received {dim}"
     if dim == 3:
         n = adjacency_matrix.shape[2]
         laplacian = np.array(adjacency_matrix, dtype=np.int32)
@@ -330,19 +330,31 @@ class UnprepNpzDataloader:
         n, g = k
 
         # Return the data
-        num_samples = (
-            self.data[f"{n}/{g}/gate"].shape[0]
-            if self.old
-            else self.data[f"{n}/{g}/unprep_gate"].shape[0]
-        )
-        layout = self.data[f"{n}/{g}/layout"].reshape((num_samples, n, n))[idxs].astype(np.bool_)
-        eval, evec = transform_graph(layout)
         if self.old:
+            num_samples = self.data[f"{n}/{g}/gate"].shape[0]
+            layout = (
+                self.data[f"{n}/{g}/layout"].reshape((num_samples, n, n))[idxs].astype(np.bool_)
+            )
+            eval, evec = transform_graph(layout)
             gates = self.data[f"{n}/{g}/gate_oh"].reshape((num_samples, -1))[idxs]
             gate_qubits = self.data[f"{n}/{g}/gate_qubit_oh"].reshape((num_samples, -1))[idxs]
+            unprep_gate = self.data[f"{n}/{g}/gate"][idxs]
+            observation = _convert_to_bool(
+                self.data[f"{n}/{g}/observation"].reshape((num_samples, -1))[idxs], n, self.old
+            )
         else:
-            gates = self.data[f"{n}/{g}/gates"][idxs]
-            gate_qubits = self.data[f"{n}/{g}/gate_qubits"][idxs].reshape(layout.shape[0], -1)
+            unprep_gate = self.data[f"{n}/{g}/unprep_gate"][idxs]
+            # Collect layouts from global data
+            global_n_idxs = self.data[f"{n}/{g}/global_n_idx"][idxs]
+            layout = self.data[f"global_n/{n}/layout"][global_n_idxs]
+            eval, evec = transform_graph(layout)
+            # Collect gates and gate_qubits from global data
+            global_g_idxs = self.data[f"{n}/{g}/global_g_idx"][idxs]
+            gates = self.data[f"global_g/{g}/gates"][global_g_idxs]
+            gate_qubits = self.data[f"global_g/{g}/gate_qubits"][global_g_idxs].reshape(
+                len(idxs), -1
+            )
+            observation = _convert_to_bool(self.data[f"{n}/{g}/observation"][idxs], n)
         # Construct the input
         object = {
             "layout": layout,
@@ -350,15 +362,9 @@ class UnprepNpzDataloader:
             "eigvec": evec,
             "gates": gates,
             "gate_qubits": gate_qubits,
-            "observation": _convert_to_bool(
-                self.data[f"{n}/{g}/observation"].reshape((num_samples, -1))[idxs], n, self.old
-            ),
+            "observation": observation,
             # self.data[f"{n}/{g}/observation"],
-            "unprep_gate": (
-                self.data[f"{n}/{g}/gate"][idxs]
-                if self.old
-                else self.data[f"{n}/{g}/unprep_gate"][idxs]
-            ),
+            "unprep_gate": unprep_gate,
             "depth": self.data[f"{n}/{g}/depth"][idxs],
         }
         self.iter_idx += 1
