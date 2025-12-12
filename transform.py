@@ -1,8 +1,8 @@
 import os
-import sys
 import random
 import shutil
 import string
+import sys
 from ctypes import sizeof
 from enum import Enum
 
@@ -291,7 +291,7 @@ if __name__ == "__main__":
     ]
     assert (
         not existing_fragments
-    ), f"Fragments for {args.output_filename} already exist: {existing_fragments}"
+    ), f"Fragments for {args.filename} already exist: {existing_fragments}"
 
     tic = time.time()
     folder = args.folder
@@ -300,6 +300,6 @@ if __name__ == "__main__":
     compiler = UnprepDataCompiler(files)
     compiler.load_data()
     print("Total size:", compiler.get_total_size())
-    compiler.create_npz_file(args.output_filename)
+    compiler.create_npz_file(args.filename)
     toc = time.time()
-    print(f"Converted {folder} -> {args.output_filename} ({toc-tic} sec)")
+    print(f"Converted {folder} -> {args.filename} ({toc-tic} sec)")
