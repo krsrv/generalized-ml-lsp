@@ -329,7 +329,6 @@ class Trainer:
             "epoch": epoch,
             "iter_idx": iter_idx,
             "model_state_dict": self.model.state_dict(),
-            "optimizer_state_dict": self.optimizer.state_dict(),
             **stats,
         }
         torch.save(data, f"{self.checkpoint_folder}/model-{epoch}-{iter_idx}.pt")
