@@ -47,13 +47,17 @@ class Splitter:
         "observation",
         "global_n_idx",
         "global_g_idx",
+        # "gates",
+        # "gate_qubits",
     ]
     keyword_dtypes = [
-        np.int32,
-        np.int32,
+        np.uint16,
+        np.uint16,
         np.uint64,
         np.uint8,
         np.uint8,
+        # np.uint16,
+        # np.uint8
     ]
 
     def __init__(self, files: list[str], seed: int = 1) -> None:
@@ -408,23 +412,42 @@ def calculate_hash(input):
 
 
 if __name__ == "__main__":
+    import argparse
     import time
 
-    splitter = Splitter(
-        [
-            "training-data/big_data.npz",
-        ]
+    parser = argparse.ArgumentParser(description="Split npz files into training, test, validation")
+    parser.add_argument(
+        "--input-files", type=str, required=True, help="Comma separated input filenames"
     )
+    parser.add_argument(
+        "--output-filename",
+        type=str,
+        required=True,
+        help="Output filename without npz extension. Eg - training-data/split/LSPMix",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=64,
+        help="Batch size for splitting",
+    )
+
+    args = parser.parse_args()
+    print(args)
+
+    splitter = Splitter(args.input_files.split(","))
     print(f"Total size: {splitter.total_size}")
-    splitter.set_batch_size(64)
-    folder = "training-data/"
-    prefix = "data"
+    splitter.set_batch_size(args.batch_size)
+
+    folder = os.path.dirname(args.output_filename)
+    prefix = os.path.basename(args.output_filename)
     existing_splits = [
         fname
         for fname in os.listdir(folder)
         if fname in [f"{prefix}-train.npz", f"{prefix}-test.npz", f"{prefix}-validation.npz"]
     ]
     assert not existing_splits, f"Splits for {folder}/{prefix} already exist: {existing_splits}"
+
     test_size, validation_size, train_size = splitter.generate_split(folder, prefix)
     print(
         f"(Test, Validation, Train) size: ({test_size}, {validation_size}, {train_size})"
