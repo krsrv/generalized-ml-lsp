@@ -288,8 +288,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Convert C++ data output to ML training format")
     parser.add_argument(
-        "--output_filename", type=str, required=True,
-        help="Output filename, without npz extension")
+        "--output-filename", type=str, required=True, help="Output filename, without npz extension"
+    )
     parser.add_argument("--folder", type=str, required=True, help="Input folder")
     args = parser.parse_args()
 
@@ -305,7 +305,7 @@ if __name__ == "__main__":
     ]
     assert (
         not existing_fragments
-    ), f"Fragments for {args.filename} already exist: {existing_fragments}"
+    ), f"Fragments for {args.output_filename} already exist: {existing_fragments}"
 
     tic = time.time()
     folder = args.folder
@@ -314,6 +314,6 @@ if __name__ == "__main__":
     compiler = UnprepDataCompiler(files)
     compiler.load_data()
     print("Total size:", compiler.get_total_size())
-    compiler.create_npz_file(args.filename)
+    compiler.create_npz_file(args.output_filename)
     toc = time.time()
-    print(f"Converted {folder} -> {args.filename} ({toc-tic} sec)")
+    print(f"Converted {folder} -> {args.output_filename} ({toc-tic} sec)")
