@@ -24,14 +24,14 @@ def elapsed_str(elapsed_bot, elapsed_bob, curr_batch_idx, total_batches):
 
 # From `utils.hpp`
 def get_max_depth(n: int):
-    return int(np.ceil(n * (n + 3) / 2 / np.log2(n)))
+    return np.maximum(2, int(np.ceil(n * (n + 3) / 2 / np.log2(n))))
 
 
 def run_inference(
     model_file: str,
     dataset_file: str,
     output_file: str,
-    max_depth: int,
+    global_max_depth: int,
     batch_size: int,
     beam_width: int,
     remove_duplicates: bool = False,
@@ -46,7 +46,7 @@ def run_inference(
         32,
         hetero_attention_embed_dim=100,
     )
-    wrapper = InferWrapper(model, model_file, max_depth, compile=compile)
+    wrapper = InferWrapper(model, model_file, global_max_depth, compile=compile)
 
     full_dataset = UnprepNpzDataloader(dataset_file, shuffle=True, seed=seed)
 
@@ -66,6 +66,7 @@ def run_inference(
         # print(f"Batch {batch_idx}: {data["layout"].shape[-1]}, {data["gates"].shape[-1]}")
         # continue
         n = data["layout"].shape[-1]
+        max_depth = get_max_depth(n) if global_max_depth == 0 else global_max_depth
         output_paths = wrapper.infer_batch(
             data["layout"],
             data["eigval"],
@@ -120,7 +121,7 @@ def run_inference(
                 unprepped_better=unprepped_better,
                 has_2_qubit_gateset=has_2_qubit_gateset,
                 has_2_qubit_gate_truth=has_2_qubit_gate_truth,
-                n=n,
+                n=n_data,
                 seed=seed,
             )
 
@@ -152,7 +153,7 @@ def run_inference(
         unprepped_better=unprepped_better,
         has_2_qubit_gateset=has_2_qubit_gateset,
         has_2_qubit_gate_truth=has_2_qubit_gate_truth,
-        n=n,
+        n=n_data,
         seed=seed,
     )
 
