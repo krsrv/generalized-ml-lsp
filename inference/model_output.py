@@ -94,6 +94,6 @@ if __name__ == "__main__":
     model.eval()
 
     # # Check loss values for samples picked directly from the training set.
-    # np.random.seed(4)
-    dataset = UnprepNpzDataloader("training-data/validation.npz")
+    seed = 1
+    dataset = UnprepNpzDataloader("training-data/validation.npz", seed=seed)
     run_and_dump_output(model, dataset, f"{os.path.dirname(file)}/model_output_data.pt")

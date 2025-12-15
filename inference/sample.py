@@ -144,12 +144,10 @@ if __name__ == "__main__":
     parser.add_argument("--beam-width", type=int, default=5, required=True, help="Beam width")
     parser.add_argument("--max-depth", type=int, default=10, required=True, help="Max depth")
     parser.add_argument("--remove-duplicates", action="store_true", help="Remove duplicates")
+    parser.add_argument("--model-file", type=str, required=True, help="Model file")
     args = parser.parse_args()
     print(f"Args: {args}")
 
-    seed = 10
-    np.random.seed(seed)
-    model_file = "output/full_run_2_10-epochs=10-lr=0.001-beta=(0.9, 0.999)-iter-9/model-9-35357.pt"
     dummy_wrapper = InferWrapper(
         ModelV0(
             128,
@@ -159,11 +157,14 @@ if __name__ == "__main__":
             32,
             hetero_attention_embed_dim=100,
         ),
-        model_file,
+        args.model_file,
         1,
     )
 
-    dataset = UnprepNpzDataloader("training-data/split/2-10-validation.npz", shuffle=True)
+    seed = 1
+    dataset = UnprepNpzDataloader(
+        "training-data/split/2-10-validation.npz", shuffle=True, seed=seed
+    )
     dataset.set_batch_size(1)
 
     run_inference_train(

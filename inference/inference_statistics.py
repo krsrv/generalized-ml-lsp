@@ -31,6 +31,7 @@ def run_inference(
     beam_width: int,
     remove_duplicates: bool = False,
     compile: bool = False,
+    seed: int = 1,
 ):
     model = ModelV0(
         128,
@@ -42,7 +43,7 @@ def run_inference(
     )
     wrapper = InferWrapper(model, model_file, max_depth, compile=compile)
 
-    full_dataset = UnprepNpzDataloader(dataset_file, shuffle=True)
+    full_dataset = UnprepNpzDataloader(dataset_file, shuffle=True, seed=seed)
 
     full_dataset.set_batch_size(batch_size)
 
@@ -145,9 +146,26 @@ def run_inference(
     )
 
 
+def update_metadata_with_system(metadata: dict):
+    metadata["cpu_count"] = os.cpu_count()
+    if torch.cuda.is_available():
+        gpu_count = torch.cuda.device_count()
+        metadata["gpu_count"] = gpu_count
+        metadata["gpu"] = []
+        for i in range(gpu_count):
+            props = torch.cuda.get_device_properties(i)
+            metadata["gpu"].append(
+                {
+                    "name": torch.cuda.get_device_name(i),
+                    "memory": props.total_memory / (1024**3),
+                    "multi_processor_count": props.multi_processor_count,
+                }
+            )
+
+
 if __name__ == "__main__":
-    # INSERT_YOUR_CODE
     import argparse
+    import json
     import os
 
     parser = argparse.ArgumentParser(description="Inference parameters")
@@ -159,6 +177,7 @@ if __name__ == "__main__":
     parser.add_argument("--dataset", type=str, required=True, help="Dataset file")
     parser.add_argument("--expid", type=str, help="Experiment ID")
     parser.add_argument("--compile", action="store_true", help="Use torch compile")
+    parser.add_argument("--info", action=str, help="Additional info about experiment")
     args = parser.parse_args()
     print(f"Args: {args}")
 
@@ -169,9 +188,13 @@ if __name__ == "__main__":
     )
     print(f"Output file: {args.output_file}")
 
-    global seed
+    metadata = {}
+    metadata["args"] = dict(args._get_kwargs())
+    update_metadata_with_system(metadata)
+    with open(os.path.join(parent_dir, f"metadata-{args.expid}.json"), "w") as f:
+        json.dump(metadata, f, indent=2)
+
     seed = 1
-    np.random.seed(seed)
     run_inference(
         args.model_file,
         args.dataset,
@@ -181,4 +204,5 @@ if __name__ == "__main__":
         args.beam_width,
         args.remove_duplicates,
         compile=args.compile,
+        seed=seed,
     )

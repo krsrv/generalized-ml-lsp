@@ -107,6 +107,7 @@ class Trainer:
         hyperparams: HyperParameters,
         output_folder: str,
         compile: bool = False,
+        seed: int = 1,
     ):
         self.model = model_wrapper.model
         if compile:
@@ -121,9 +122,13 @@ class Trainer:
         )
         print(f"Optimizer: {self.optimizer.__class__.__name__}")
 
-        self.train_data = UnprepNpzDataloader(hp["trainer/train_file"], shuffle=True)
-        self.validation_data = UnprepNpzDataloader(hp["trainer/validation_file"], shuffle=False)
-        self.test_data = UnprepNpzDataloader(hp["trainer/test_file"], shuffle=False, mload=False)
+        self.train_data = UnprepNpzDataloader(hp["trainer/train_file"], shuffle=True, seed=seed)
+        self.validation_data = UnprepNpzDataloader(
+            hp["trainer/validation_file"], shuffle=False, seed=seed
+        )
+        self.test_data = UnprepNpzDataloader(
+            hp["trainer/test_file"], shuffle=False, mload=False, seed=seed
+        )
 
         print("Total sizes of datasets:")
         print(f"Train - {self.train_data.get_total_size()}")
@@ -331,6 +336,7 @@ class Trainer:
             "model_state_dict": self.model.state_dict(),
             **stats,
         }
+        print(f"Stored checkpoint ({iter_idx} iteration, {epoch} epoch)", flush=True)
         torch.save(data, f"{self.checkpoint_folder}/model-{epoch}-{iter_idx}.pt")
 
 
@@ -383,6 +389,12 @@ def main():
     parser.add_argument("--prefix", type=str, default="", help="Name prefix for folder")
     parser.add_argument("--expid", type=str, default="", help="Name suffix for folder")
     parser.add_argument("--compile", action="store_true", help="Use torch compile")
+    parser.add_argument(
+        "--info",
+        type=str,
+        default="",
+        help="Additional information about experiment (logged in metadata.json)",
+    )
     args = parser.parse_args()
     print(f"Args: {args}")
 
@@ -400,11 +412,9 @@ def main():
 
     # Set global seeds for reproducibility
     seed = 1
-    np.random.seed(seed)
     torch.manual_seed(seed)
-
     model = ModelWrapper(params)
-    trainer = Trainer(model, params, output_folder, compile=args.compile)
+    trainer = Trainer(model, params, output_folder, compile=args.compile, seed=seed)
 
     metadata = {}
     update_metadata_with_args(args, metadata)
