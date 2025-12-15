@@ -22,6 +22,11 @@ def elapsed_str(elapsed_bot, elapsed_bob, curr_batch_idx, total_batches):
     return f"Iterated over {curr_batch_idx} batches ({elapsed_bob} s)| Avg time: {avg_time:.7f} s/batch | Estimated time left for epoch: {est_str}"
 
 
+# From `utils.hpp`
+def get_max_depth(n: int):
+    return int(np.ceil(n * (n + 3) / 2 / np.log2(n)))
+
+
 def run_inference(
     model_file: str,
     dataset_file: str,
@@ -54,11 +59,13 @@ def run_inference(
     actual_depth = np.array([])
     has_2_qubit_gateset = np.array([])
     has_2_qubit_gate_truth = np.array([])
+    n_data = np.array([])
 
     tic = batch_tic = time.time()
     for batch_idx, data in enumerate(iter(full_dataset)):
         # print(f"Batch {batch_idx}: {data["layout"].shape[-1]}, {data["gates"].shape[-1]}")
         # continue
+        n = data["layout"].shape[-1]
         output_paths = wrapper.infer_batch(
             data["layout"],
             data["eigval"],
@@ -68,6 +75,7 @@ def run_inference(
             data["observation"],
             beam_width=beam_width,
             remove_duplicates=remove_duplicates,
+            max_depth=get_max_depth(n),
         )
         for i, path in enumerate(output_paths):
             # print("Depth shape", path.depths.shape)
@@ -88,6 +96,7 @@ def run_inference(
             has_2_qubit_gate_truth = np.append(
                 has_2_qubit_gate_truth, not is_1_qubit_gate(data["unprep_gate"][path.identifier])
             )
+            n_data = np.append(n_data, n)
 
         actual_depth = np.append(actual_depth, data["depth"])
 
@@ -111,6 +120,7 @@ def run_inference(
                 unprepped_better=unprepped_better,
                 has_2_qubit_gateset=has_2_qubit_gateset,
                 has_2_qubit_gate_truth=has_2_qubit_gate_truth,
+                n=n,
                 seed=seed,
             )
 
@@ -142,6 +152,7 @@ def run_inference(
         unprepped_better=unprepped_better,
         has_2_qubit_gateset=has_2_qubit_gateset,
         has_2_qubit_gate_truth=has_2_qubit_gate_truth,
+        n=n,
         seed=seed,
     )
 
@@ -170,7 +181,13 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Inference parameters")
     parser.add_argument("--beam-width", type=int, default=5, required=True, help="Beam width")
-    parser.add_argument("--max-depth", type=int, default=10, required=True, help="Max depth")
+    parser.add_argument(
+        "--max-depth",
+        type=int,
+        default=0,
+        required=True,
+        help="Global max depth. If 0, need to pass max depth constraint for each inference call",
+    )
     parser.add_argument("--batch-size", type=int, default=32, required=True, help="Batch size")
     parser.add_argument("--remove-duplicates", action="store_true", help="Remove duplicates")
     parser.add_argument("--model-file", type=str, required=True, help="Model file")

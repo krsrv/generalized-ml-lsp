@@ -655,6 +655,7 @@ class InferWrapper:
         targets: np.ndarray,
         beam_width: int = 1,
         remove_duplicates: bool = False,
+        max_depth: int = 0,
     ) -> list[Path]:
         """
         High level function to run inference on a given problem for unpreparing state.
@@ -666,6 +667,7 @@ class InferWrapper:
             gate_qubits: (np.ndarray) (bs, 2*g)
             targets: (np.ndarray) (bs, 2*n+n)
             beam_width: (int)
+            max_depth: (int): override global max depth settings
 
         Returns:
             output_paths: list[Path]
@@ -675,6 +677,10 @@ class InferWrapper:
                 The order of the elements in `output_paths` will match the batch order in the
                 input.
         """
+        assert not (
+            max_depth <= 0 and self.max_depth <= 0
+        ), "Either set global or local max depth constraint."
+        max_depth = np.maximum(max_depth, self.max_depth)
         # Initialize variables
         batch_size = evals.shape[0]
         data = DataHolder(
@@ -688,11 +694,11 @@ class InferWrapper:
         width = 1
 
         with torch.no_grad():
-            # Model inference runs only `self.max_depth` times. But simulation for each gate
+            # Model inference runs only `max_depth` times. But simulation for each gate
             # prediction in i-th iter happens at beginning of the (i+1)-th loop. The
-            # `self.max_depth+1`-th iter only runs the simulation and then breaks out of the
+            # `max_depth+1`-th iter only runs the simulation and then breaks out of the
             # loop.
-            while depth < self.max_depth + 1:
+            while depth < max_depth + 1:
                 ############
                 # Expand beam with new elements.
                 ############
@@ -711,14 +717,14 @@ class InferWrapper:
                     )
                 else:
                     gate_predictions = nn.Softmax(-1)(gate_prediction_logit)
-                    expansion_ratio = 4 if depth != self.max_depth else 1
+                    expansion_ratio = 4 if depth != max_depth else 1
                     batch_size, width, unprepped_batches = curr_beam.update_states(
                         gate_predictions, output_paths, simulator, expansion_ratio
                     )
                     simulator.remove_batch(unprepped_batches)
                     data.remove_batch(unprepped_batches)
                     # Break the loop after simulating the last set of gates.
-                    if depth == self.max_depth or batch_size == 0:
+                    if depth == max_depth or batch_size == 0:
                         break
 
                 ############
@@ -747,7 +753,7 @@ class InferWrapper:
                     1, top_indices.unsqueeze(-1).expand(-1, -1, gate_prediction_logit.shape[-1])
                 )
                 curr_beam.filter_beam(top_indices)
-                if depth < self.max_depth + 1:
+                if depth < max_depth + 1:
                     curr_beam.append_depth_tensor(depth_prediction)
 
                 depth += 1
