@@ -194,7 +194,7 @@ if __name__ == "__main__":
     parser.add_argument("--dataset", type=str, required=True, help="Dataset file")
     parser.add_argument("--expid", type=str, help="Experiment ID")
     parser.add_argument("--compile", action="store_true", help="Use torch compile")
-    parser.add_argument("--info", action=str, help="Additional info about experiment")
+    parser.add_argument("--info", type=str, help="Additional info about experiment")
     args = parser.parse_args()
     print(f"Args: {args}")
 
