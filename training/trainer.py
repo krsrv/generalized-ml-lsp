@@ -393,7 +393,8 @@ def main():
         "--info",
         type=str,
         default="",
-        help="Additional information about experiment (logged in metadata.json)",
+        nargs="+",
+        help="Additional information about experiment (logged in metadata.json). Use quotes to pass multi-word values.",
     )
     args = parser.parse_args()
     print(f"Args: {args}")
