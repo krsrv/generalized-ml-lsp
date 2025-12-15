@@ -52,14 +52,14 @@ def run_inference(
 
     full_dataset.set_batch_size(batch_size)
 
-    unprepped_successfully = np.array([])  # Unprepped correctly
-    unprepped_better = np.array([])  # Unprepped in the correct number of gates
-    depth_prediction = np.array([])  # Model's prediction of depth
-    depth_inference = np.array([])  # Max depth that model tried for before termination
-    actual_depth = np.array([])
-    has_2_qubit_gateset = np.array([])
-    has_2_qubit_gate_truth = np.array([])
-    n_data = np.array([])
+    unprepped_successfully = np.empty(0, dtype=bool)  # Unprepped correctly
+    unprepped_better = np.empty(0, dtype=bool)  # Unprepped in the correct number of gates
+    depth_prediction = np.empty(0, dtype=float)  # Model's prediction of depth
+    depth_inference = np.empty(0, dtype=float)  # Max depth that model tried for before termination
+    actual_depth = np.empty(0, dtype=float)
+    has_2_qubit_gateset = np.empty(0, dtype=bool)
+    has_2_qubit_gate_truth = np.empty(0, dtype=bool)
+    n_data = np.empty(0, dtype=int)
 
     tic = batch_tic = time.time()
     for batch_idx, data in enumerate(iter(full_dataset)):
@@ -99,7 +99,6 @@ def run_inference(
             n_data = np.append(n_data, n)
 
         actual_depth = np.append(actual_depth, data["depth"])
-
         if batch_idx % 500 == 0:
             print(
                 elapsed_str(
@@ -107,7 +106,8 @@ def run_inference(
                     time.time() - batch_tic,
                     batch_idx,
                     full_dataset.get_total_size() / full_dataset.batch_size,
-                )
+                ),
+                flush=True,
             )
             batch_tic = time.time()
         if batch_idx % 1000 == 0:
