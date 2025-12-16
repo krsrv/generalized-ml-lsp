@@ -1,377 +1,409 @@
 """
-Custom dataloader class for HDF5 files (where keys are `n/g/{key}`).
+Custom dataloader for LSP data.
 """
 
-import time
-from collections import defaultdict
-from functools import wraps
-
+import warnings
 import numpy as np
+import numba
 
-
-def transform_graph(adjacency_matrix):
+def transform_graph(adjacency_matrix: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """
-    Transform an adjacency matrix to a laplacian matrix and return the eigenvalues, eigenvectors.
-    Adjacency matrix should be of size (bs, n, n) where each (n, n) submatrix represents a
-    different layout.
+    Transform an adjacency matrix to a laplacian matrix and return the
+    eigenvalues, eigenvectors.
+    Adjacency matrix should be of size (bs, n, n) where each (n, n) submatrix
+    represents a different layout.
+
+    float64 is used for intermediate calculations, output is float32.
     """
-    dim = len(adjacency_matrix.shape)
-    assert dim == 2 or dim == 3, f"Expected dimension 2 or 3 for adjacency matrix, received {dim}"
-    if dim == 3:
-        n = adjacency_matrix.shape[2]
-        laplacian = np.array(adjacency_matrix, dtype=np.int32)
-        diagonals = -np.sum(laplacian, axis=2)
-        laplacian = laplacian + diagonals[:, None, :] * np.eye(n)[None, :, :]
-        return np.linalg.eigh(laplacian)
-    else:
-        n = adjacency_matrix.shape[1]
-        laplacian = np.array(adjacency_matrix, dtype=np.int32)
-        diagonals = -np.diag(np.sum(laplacian, axis=1))
-        laplacian = laplacian + diagonals
-        return np.linalg.eigh(laplacian)
+    adj = adjacency_matrix.astype(np.float64)
+    n = adj.shape[-1]
+    if adj.shape[-2] != n:
+        raise ValueError(
+            f"Adjacency matrix should be square, not shape={adj.shape}.")
+    degrees = np.sum(adj, axis=-1)
+    laplacian = -adj
+    ii = np.arange(n)
+    laplacian[..., ii, ii] += degrees
+    eigval, eigvec = np.linalg.eigh(laplacian)
+    return eigval.astype(np.float32), eigvec.astype(np.float32)
 
-
-def _convert_to_bool(data: np.ndarray, n: int, old: bool = False):
-    if old:
-        return data
+@numba.njit
+def _dilate32(x: np.uint64) -> np.uint64:
     """
-    Convert int64 format of stabilizer to a bool format. The int64 format is defined in
-    `tableau_xz31.hpp`. It stores a [X1 ... Xn Z1 ... Zn sign] bool vector as a uint64 `v`
-    where (copied verbatim from `tableau_xz31.hpp`):
-    # 1. Pauli is written as (-1)^{s} i^{a · b} X^{a} Z^{b}, where a,b are vectors of
-    # length 31 with entries in {0,1}, s in {0, 1}.
-    # 2.1. ((v >> 63) & 1) == s,
-    # 2.2. ((v >> 31) & 1) == 0,
-    # 2.3. ((v >> j) & 1) == b[j] for j in [0, 30],
-    # 2.4. ((v >> (j + 32)) & 1) == a[j] for j in [0, 30].
+    Assuming high 32 bits of x are 0,
+    alternates the low 32 bits with 0s to fill np.uint64 with odd bits =0.
     """
-    bs, _ = data.shape
-    new_data = np.zeros((bs, n, 2 * n + 1), dtype=np.bool_)
-    for i in range(n):
-        # Z stabilizer
-        new_data[:, :, n + i] = (data >> i) & 1
-        # X stabilizer
-        new_data[:, :, i] = (data >> (32 + i)) & 1
-    new_data[:, :, -1] = (data >> 63) & 1
-    return new_data.reshape(bs, -1)
+    # In C++ we can use _pdep_u64, but I'm not sure if numba supports it.
+    # Here is a bit-twiddling implementation:
+    x = (x | (x << 16)) & np.uint64(0x0000FFFF0000FFFF)
+    x = (x | (x <<  8)) & np.uint64(0x00FF00FF00FF00FF)
+    x = (x | (x <<  4)) & np.uint64(0x0F0F0F0F0F0F0F0F)
+    x = (x | (x <<  2)) & np.uint64(0x3333333333333333)
+    x = (x | (x <<  1)) & np.uint64(0x5555555555555555)
+    return x
 
+@numba.njit
+def _zip_lohi_shift(x: np.uint64) -> np.uint64:
+    return ((_dilate32(x >> 32) << 1)
+            | _dilate32(x & np.uint64(0x00000000FFFFFFFF)))
 
-def timeit(func):
-    @wraps(func)
-    def timeit_wrapper(*args, **kwargs):
-        start_time = time.perf_counter()
-        result = func(*args, **kwargs)
-        end_time = time.perf_counter()
-        total_time = end_time - start_time
-        # first item in the args, ie `args[0]` is `self`
-        print(f"Function {func.__name__}{args} {kwargs} Took {total_time:.4f} seconds")
-        return result
+@numba.njit
+def _convert_obs_to_sxzxz(obs: np.ndarray):
+    for i in range(obs.size):
+        obs.flat[i] = _zip_lohi_shift(obs.flat[i])
 
-    return timeit_wrapper
-
-
-class ShardReader:
-    def __init__(self, files: list[str]):
-        super().__init__()
-        self.files = files
-        self.load_data()
-        self.construct_metadata()
-        self.batch_size = 64
-
-    def load_data(self):
-        self.data = {}
-        for file in self.files:
-            self.data[file] = np.load(file)
-
-    def construct_metadata(self):
-        """
-        Store metadata about the data. Metadata includes:
-        1. per_shard_aggregate_metadata - ith element stores a dictionary of (n, g) -> size
-        2. size_list - list of sizes in each shard
-        """
-        # To support multiple files, look at the module training.split for inspiration.
-        import os
-
-        self.per_shard_aggregate_metadata = [None for _ in self.files]
-        total = 0
-        for i, file in enumerate(self.files):
-            data = np.load(file)
-            self.per_shard_aggregate_metadata[i] = {}
-            for key in data:
-                if not key.endswith("unprep_gate"):
-                    continue
-                size = data[key].shape[0]
-                total += size
-                n, g, _ = key.split("/")
-                self.per_shard_aggregate_metadata[i][(int(n), int(g))] = size
-            del data
-        self.size_list = np.array(
-            [w for v in self.per_shard_aggregate_metadata for w in v.values()]
-        )
-
-    def set_batch_size(self, batch_size):
-        """
-        Manually set the `batch_size` in the iter.
-        """
-        self.batch_size = batch_size
-
-    def _init_shard_iter(self, shard_idx):
-        """
-        Load data in memory and reset iteration indices for shard corresponding to `shard_idx`
-        """
-        if hasattr(self, "loaded_data"):
-            del self.loaded_data
-        # Load the data in memory
-        self.loaded_data = {}
-        data = np.load(self.files[shard_idx])
-        for key in data:
-            self.loaded_data[key] = data[key]
-
-        # Set the iteration elements
-        # Set up bookmarks for:
-        #  1. iteration order of (n, g) to go over for this shard
-        #  2. iteration index
-        #  3. starting offset for each (n, g)
-        self.iter_idx = 0
-        self.iter_ng_counter = {}
-        self.iter_order = []
-        for k, v in self.per_shard_aggregate_metadata[shard_idx].items():
-            num_batches = int(v // self.batch_size)
-            self.iter_ng_counter[k] = 0
-            for i in range(num_batches):
-                self.iter_order.append(k)
-        np.random.shuffle(self.iter_order)
-
-    def __iter__(self):
-        self.shard_idx = 0
-        self._init_shard_iter(self.shard_idx)
-        return self
-
-    def __next__(self):
-        if self.iter_idx >= len(self.iter_order):
-            self.shard_idx += 1
-            # If we reach the end of all shards, we have finished iterating
-            if self.shard_idx >= len(self.files):
-                raise StopIteration
-            # Else, move to next shard
-            print("Reading new shard")
-            self._init_shard_iter(self.shard_idx)
-
-        ######################################################################
-        # For iteration, we pick the current (n, g) value to sample, and pick
-        # `batch_size` elements starting from the current offset for (n, g).
-        # We are guaranteed that the starting offset won't exceed the number
-        # of datapoints that exist for (n, g).
-        ######################################################################
-        # Extract the current (n, g) key
-        k = self.iter_order[self.iter_idx]
-        n, g = k
-
-        # Return the data
-        start_idx = self.iter_ng_counter[(n, g)]
-        idxs = np.arange(start_idx, start_idx + self.batch_size)
-        layout = self.loaded_data[f"{n}/{g}/layout"][idxs]
-        eval, evec = transform_graph(layout)
-        gate_qubits = self.loaded_data[f"{n}/{g}/gate_qubits"][idxs].reshape(layout.shape[0], -1)
-        # Construct the input
-        object = {
-            "layout": layout,
-            "eigval": eval,
-            "eigvec": evec,
-            "gates": self.loaded_data[f"{n}/{g}/gates"][idxs],
-            "gate_qubits": gate_qubits,
-            "observation": _convert_to_bool(self.loaded_data[f"{n}/{g}/observation"][idxs], n),
-            "unprep_gate": self.loaded_data[f"{n}/{g}/unprep_gate"][idxs],
-            "depth": self.loaded_data[f"{n}/{g}/depth"][idxs],
-        }
-        self.iter_ng_counter[(n, g)] += self.batch_size
-        self.iter_idx += 1
-        return object
-
-    def get_total_size(self):
-        return np.sum(self.size_list)
-
-
-class UnprepNpzDataloader:
+def convert_obs_to_sxzxz(obs: np.ndarray):
     """
-    Class to handle npz files (where keys are `n/g/{key}`). The data is a collection of circuit
-    layout, gate sets, input state and unpreparation unitary (just 1 gate). For now, the class
-    supports handling only 1 file as input.
-    TODO: Increase support to multiple files.
+    Changes the bit layout from 0bSXX..XX0ZZ..ZZ to 0bS0XZXZ..XZXZ.
     """
+    assert obs.dtype == np.uint64
+    _convert_obs_to_sxzxz(obs)
 
+def scale_depth(val, n):
+    """Scaling to ensure that scaled depth has mean ~0 and std ~1:
+
+    For the latest dataset this results in mean=0.260, std=2.189.
+    """
+    assert np.all(n >= 2)
+    dmax = n * (n + 3) / 2 / np.log2(n)
+    return ((val - dmax / 2) / np.sqrt(dmax)).astype(np.float32)
+
+def unscale_depth(val, n):
+    dmax = n * (n + 3) / 2 / np.log2(n)
+    return np.sqrt(dmax) * val + dmax / 2
+
+class LSPDataLoader:
     def __init__(
-        self, file: str, shuffle: bool = True, old: bool = False, mload: bool = True, seed: int = 1
-    ):
-        super().__init__()
-        self.load_file(file, mload)
-        self.old = old
-        self.construct_metadata()
+            self, train_filename, batch_size: int, shuffle: bool=True,
+            seed: int=1, validate: bool=False):
         self.shuffle = shuffle
-        self.rng = np.random.default_rng()
-        self.batch_size = 64
-        self.rng = np.random.default_rng(seed)
-
-    @timeit
-    def load_file(self, file: str, mload: bool = True):
-        """
-        Use only 1 file as input. Register the file as a member of the class.
-        """
-        data = np.load(file, "r")
-        if mload:
-            self.data = {}
-            # Load in memory
-            for key in data:
-                self.data[key] = data[key]
-        else:
-            self.data = data
-
-    def construct_metadata(self):
-        """
-        Store metadata about the data. Metadata includes:
-        1. aggregate_metadata - reverse map of (n, g) -> size of dataset
-        2. size_list - list of sizes of each (n, g) dataset
-        3. ng_list - list of (n, g). Same order as size_list.
-        """
-        # To support multiple files, look at the module training.split for inspiration.
-        self.aggregate_metadata = {}
-        self.reverse_map = {}
-        total = 0
-        data = self.data
-        for key in data.keys():
-            if self.old:
-                if not key.endswith("gate"):
-                    continue
-            else:
-                if not key.endswith("unprep_gate"):
-                    continue
-            size = data[key].shape[0]
-            total += size
-            n, g, _ = key.split("/")
-            self.aggregate_metadata[(int(n), int(g))] = size
-        self.size_list = np.array([v for v in self.aggregate_metadata.values()])
-        self.p = self.size_list / np.sum(self.size_list)
-
-        self.ng_list = list(self.aggregate_metadata.keys())
+        if shuffle:
+            self.seed = seed
+            self.rng = np.random.default_rng(seed)
+        self.eigval = {} # key = n
+        self.eigvec = {} # key = n
+        self.gate = {} # key = g
+        self.gate_qubit = {} # key = g
+        self.observation_sxzxz = {} # key = ng
+        self.unprep_gate = {} # key = ng
+        self.scaled_depth = {} # key = ng
+        self.global_n_idx = {} # key = ng
+        self.global_g_idx = {} # key = ng
+        with np.load(train_filename) as f:
+            # Eagerly loading the whole data seems to be faster
+            # than iterating over NpzFile object.
+            data = dict(f)
+        for key, v in data.items():
+            key_parts = key.split('/')
+            assert len(key_parts[0]) > 0, f"Invalid key: {key!r}"
+            if key_parts[0][0].isdigit():
+                n, g, k = key_parts
+                n = int(n)
+                g = int(g)
+                ng = (n, g)
+                match k:
+                    case "unprep_gate":
+                        self.unprep_gate[ng] = v
+                    case "depth":
+                        self.scaled_depth[ng] = scale_depth(v, n)
+                    case "observation":
+                        # Modify in-place, this is fine since `data` is not re-used later.
+                        convert_obs_to_sxzxz(v)
+                        self.observation_sxzxz[ng] = v
+                    case "global_n_idx":
+                        self.global_n_idx[ng] = v
+                    case "global_g_idx":
+                        self.global_g_idx[ng] = v
+            elif key_parts[0] == "global_n":
+                _, n, k = key_parts
+                n = int(n)
+                match k:
+                    case "layout":
+                        eigval, eigvec = transform_graph(v)
+                        self.eigval[n] = eigval
+                        self.eigvec[n] = eigvec
+            elif key_parts[0] == "global_g":
+                _, g, k = key_parts
+                g = int(g)
+                match k:
+                    case "gates":
+                        self.gate[g] = v
+                    case "gate_qubits":
+                        self.gate_qubit[g] = v
+        self.ng_list = list(self.scaled_depth.keys())
+        self.ng_counts = np.array([v.shape[0] for v in self.scaled_depth.values()])
+        self.num_samples = sum(self.ng_counts)
+        self.idxs = {
+            ng: np.arange(v.shape[0]) for ng, v in self.scaled_depth.items()}
+        if validate:
+            self.validate_data()
+        self.set_batch_size(batch_size)
 
     def set_batch_size(self, batch_size):
         """
-        Manually set the `batch_size` in the iter.
+        Sets batch_size. Invalidates iterators.
         """
         self.batch_size = batch_size
+        ng_num_batches = (self.ng_counts + batch_size - 1) // batch_size
+        self.batch_ngs = [
+            ng
+            for ng, c in zip(self.ng_list, ng_num_batches)
+            for _ in range(c)]
 
-    def random_sample_ng(self, batch_size=64):
+    def validate_data(self) -> None:
         """
-        Randomly sample (n, g) pair. If the `batch_size` is greater than the number of data points
-        available, resample (n, g).
-        The sampling is done such that each data point is picked uniformly at random at the lowest
-        data point level, and not at the (n, g) level.
+        Validate internal consistency of loaded NPZ data.
+
+        Hard failures raise ValueError/TypeError.
         """
-        size = 0
-        while size < batch_size:
-            idx = self.rng.choice(np.arange(len(self.aggregate_metadata)), p=self.p)
-            n, g = self.ng_list[idx]
-            size = self.file[f"{n}/{g}"]["layout"].shape[0]
-        return self.ng_list[idx]
+        def _fail(msg: str) -> None:
+            raise ValueError(f"LSPDataLoader.validate_data: {msg}")
+
+        def _require(cond: bool, msg: str) -> None:
+            if not cond:
+                _fail(msg)
+
+        def _is_int_dtype(a: np.ndarray) -> bool:
+            return np.issubdtype(a.dtype, np.integer)
+
+        # --- 1) Per-(n,g) key consistency / completeness ---
+        per_ng_dicts = {
+            "scaled_depth": self.scaled_depth,
+            "unprep_gate": self.unprep_gate,
+            "observation_sxzxz": self.observation_sxzxz,
+            "global_n_idx": self.global_n_idx,
+            "global_g_idx": self.global_g_idx,
+        }
+        ng_keys = set(self.scaled_depth.keys())
+        _require(len(ng_keys) > 0,
+                 "no (n,g) groups found (scaled_depth is empty).")
+
+        for name, d in per_ng_dicts.items():
+            keys = set(d.keys())
+            if keys != ng_keys:
+                msg = [f"per-ng keys mismatch for '{name}': "]
+                missing = sorted(ng_keys - keys)
+                extra = sorted(keys - ng_keys)
+                for name, lst in [("missing", missing), ("extra", extra)]:
+                    if not lst:
+                        continue
+                    msg.append(f"{name}=[")
+                    msg.append(', '.join(f"({n},{g})" for n, g in lst[:10]))
+                    if len(lst) > 10:
+                        msg.append(", ...")
+                    msg.append("]")
+                    msg.append(" ")
+                if msg[-1] == " ":
+                    msg.pop()
+                _fail(''.join(msg))
+
+        # --- 2) Global-n eigen data sanity ---
+        for n, eigval in self.eigval.items():
+            _require(isinstance(n, int) and n > 0,
+                     f"invalid n key in eigval: {n!r}")
+            _require(isinstance(eigval, np.ndarray),
+                     f"eigval[{n}] is not a numpy array.")
+            _require(eigval.ndim == 2,
+                     f"eigval[{n}] must be 2D (num_layouts, n); "
+                     f"got shape {eigval.shape}.")
+            _require(eigval.shape[1] == n,
+                     f"eigval[{n}] second dim must equal n={n}; "
+                     f"got {eigval.shape}.")
+            _require(np.issubdtype(eigval.dtype, np.floating),
+                     f"eigval[{n}] must be floating; got {eigval.dtype}.")
+
+            eigvec = self.eigvec.get(n, None)
+            _require(eigvec is not None, f"eigvec missing for n={n}.")
+            _require(isinstance(eigvec, np.ndarray),
+                     f"eigvec[{n}] is not a numpy array.")
+            _require(eigvec.ndim == 3,
+                     f"eigvec[{n}] must be 3D (num_layouts, n, n); "
+                     f"got shape {eigvec.shape}.")
+            _require(eigvec.shape[0] == eigval.shape[0],
+                     f"eigvec[{n}] first dim must match eigval[{n}] num_layouts; "
+                     f"eigvec={eigvec.shape[0]} eigval={eigval.shape[0]}.")
+            _require(eigvec.shape[1] == n and eigvec.shape[2] == n,
+                     f"eigvec[{n}] must have shape "
+                     f"(num_layouts, {n}, {n}); got {eigvec.shape}.")
+            _require(np.issubdtype(eigvec.dtype, np.floating),
+                     f"eigvec[{n}] must be floating; got {eigvec.dtype}.")
+
+            if np.any(~np.isfinite(eigval)):
+                _fail(f"eigval[{n}] contains NaN/Inf.")
+            if np.any(~np.isfinite(eigvec)):
+                _fail(f"eigvec[{n}] contains NaN/Inf.")
+
+        # --- 3) Global-g gate data sanity ---
+        for g, gates in self.gate.items():
+            _require(isinstance(g, int) and g > 0,
+                     f"invalid g key in gate: {g!r}")
+            _require(isinstance(gates, np.ndarray),
+                     f"gate[{g}] is not a numpy array.")
+            _require(gates.ndim == 2,
+                     f"gate[{g}] must be 2D (num_variants, g); "
+                     f"got shape {gates.shape}.")
+            _require(gates.shape[1] == g,
+                     f"gate[{g}] second dim must equal g={g}; got {gates.shape}.")
+
+            gate_qubits = self.gate_qubit.get(g, None)
+            _require(gate_qubits is not None,
+                     f"gate_qubit missing for g={g}.")
+            _require(isinstance(gate_qubits, np.ndarray),
+                     f"gate_qubit[{g}] is not a numpy array.")
+            # Iterator yields (bs, g, 2), so enforce that representation.
+            _require(gate_qubits.ndim == 3,
+                     f"gate_qubit[{g}] must be 3D (num_variants, g, 2); "
+                     f"got shape {gate_qubits.shape}.")
+            _require(gate_qubits.shape[1] == g and gate_qubits.shape[2] == 2,
+                     f"gate_qubit[{g}] must have shape (num_variants, {g}, 2); "
+                     f"got {gate_qubits.shape}.")
+            _require(gate_qubits.shape[0] == gates.shape[0],
+                     f"gate_qubit[{g}] num_variants must match gate[{g}]; "
+                     f"gate_qubit={gate_qubits.shape[0]} gate={gates.shape[0]}.")
+
+        # --- 4) Per-(n,g) arrays: length/dtype/bounds checks ---
+        for ng in ng_keys:
+            _require(isinstance(ng, tuple) and len(ng) == 2,
+                     f"invalid ng key: {ng!r}")
+            n, g = ng
+            _require(isinstance(n, int) and n > 0, f"invalid n in ng={ng!r}")
+            _require(isinstance(g, int) and g > 0, f"invalid g in ng={ng!r}")
+
+            _require(n in self.eigval and n in self.eigvec,
+                     f"missing eigen data for n={n} used by ng={ng}.")
+            _require(g in self.gate and g in self.gate_qubit,
+                     f"missing gate data for g={g} used by ng={ng}.")
+
+            sd = self.scaled_depth[ng]
+            up = self.unprep_gate[ng]
+            obs = self.observation_sxzxz[ng]
+            n_idx = self.global_n_idx[ng]
+            g_idx = self.global_g_idx[ng]
+
+            # First-dimension consistency (number of samples for this ng)
+            _require(isinstance(sd, np.ndarray),
+                     f"scaled_depth[{ng}] is not a numpy array.")
+            m = sd.shape[0]
+            _require(m > 0, f"scaled_depth[{ng}] has zero samples.")
+            for name, arr in (
+                    ("unprep_gate", up),
+                    ("observation_sxzxz", obs),
+                    ("global_n_idx", n_idx),
+                    ("global_g_idx", g_idx)):
+                _require(isinstance(arr, np.ndarray),
+                         f"{name}[{ng}] is not a numpy array.")
+                _require(arr.shape[0] == m,
+                         f"{name}[{ng}] first dim mismatch: "
+                         f"expected {m}, got {arr.shape[0]}.")
+
+            # Dtype checks
+            _require(np.issubdtype(sd.dtype, np.floating),
+                     f"scaled_depth[{ng}] must be floating; got {sd.dtype}.")
+            if np.any(~np.isfinite(sd)):
+                _fail(f"scaled_depth[{ng}] contains NaN/Inf.")
+
+            _require(obs.dtype == np.uint64,
+                     f"observation_sxzxz[{ng}] must be uint64; "
+                     f"got {obs.dtype}.")
+            if not obs.flags["C_CONTIGUOUS"]:
+                warnings.warn(
+                    f"observation_sxzxz[{ng}] is not C-contiguous; "
+                    "conversion/indexing may be slower.")
+
+            _require(_is_int_dtype(n_idx),
+                     f"global_n_idx[{ng}] must be integer dtype; got {n_idx.dtype}.")
+            _require(_is_int_dtype(g_idx),
+                     f"global_g_idx[{ng}] must be integer dtype; got {g_idx.dtype}.")
+            _require(n_idx.ndim == 1,
+                     f"global_n_idx[{ng}] should be 1D; got shape {n_idx.shape}.")
+            _require(g_idx.ndim == 1,
+                     f"global_g_idx[{ng}] should be 1D; got shape {g_idx.shape}.")
+
+            # Bounds checks
+            n_layouts = self.eigval[n].shape[0]
+            g_variants = self.gate[g].shape[0]
+
+            n_min = int(n_idx.min()) if n_idx.size else 0
+            n_max = int(n_idx.max()) if n_idx.size else -1
+            g_min = int(g_idx.min()) if g_idx.size else 0
+            g_max = int(g_idx.max()) if g_idx.size else -1
+
+            _require(n_min >= 0,
+                     f"global_n_idx[{ng}] contains negative indices (min={n_min}).")
+            _require(g_min >= 0,
+                     f"global_g_idx[{ng}] contains negative indices (min={g_min}).")
+            _require(n_max < n_layouts,
+                     f"global_n_idx[{ng}] out of bounds: "
+                     f"max={n_max}, but n_layouts={n_layouts}.")
+            _require(g_max < g_variants,
+                     f"global_g_idx[{ng}] out of bounds: "
+                     f"max={g_max}, but g_variants={g_variants}.")
+
+            # Dtype capacity checks (catches “this dtype can’t represent the needed range”)
+            # This does not detect past wraparound, but prevents future silent overflow.
+            if (np.issubdtype(n_idx.dtype, np.unsignedinteger)
+                    or np.issubdtype(n_idx.dtype, np.signedinteger)):
+                n_info = np.iinfo(n_idx.dtype)
+                _require(n_layouts - 1 <= n_info.max,
+                         f"global_n_idx[{ng}] dtype {n_idx.dtype} cannot "
+                         f"represent up to n_layouts-1={n_layouts-1} "
+                         f"(max={n_info.max}).")
+                if np.issubdtype(n_idx.dtype, np.signedinteger):
+                    _require(0 >= n_info.min,
+                             f"global_n_idx[{ng}] dtype {n_idx.dtype} has "
+                             f"unexpected min={n_info.min}.")
+
+            if (np.issubdtype(g_idx.dtype, np.unsignedinteger)
+                    or np.issubdtype(g_idx.dtype, np.signedinteger)):
+                g_info = np.iinfo(g_idx.dtype)
+                _require(g_variants - 1 <= g_info.max,
+                         f"global_g_idx[{ng}] dtype {g_idx.dtype} cannot "
+                         f"represent up to g_variants-1={g_variants-1} "
+                         f"(max={g_info.max}).")
+                if np.issubdtype(g_idx.dtype, np.signedinteger):
+                    _require(0 >= g_info.min,
+                             f"global_g_idx[{ng}] dtype {g_idx.dtype} has "
+                             f"unexpected min={g_info.min}.")
+
+        # --- 5) Determinism hint ---
+        if not self.shuffle:
+            if self.ng_list != sorted(self.ng_list):
+                warnings.warn(
+                    "shuffle=False but ng_list is not sorted; "
+                    "iteration order may depend on NPZ key order.")
+
+    def __len__(self):
+        return len(self.batch_ngs)
 
     def __iter__(self):
-        self.iter_idx = 0
-        # Set the iteration order
-        self.iter_order = []
-        for k, v in self.aggregate_metadata.items():
-            n, g = k
-            num_batches = int(v // self.batch_size)
-            if num_batches == 0:
-                continue
-            idxs = np.arange(v)
-            if self.shuffle:
-                self.rng.shuffle(idxs)
-            for i in range(num_batches):
-                self.iter_order.append(
-                    (k, np.sort(idxs[i * self.batch_size : (i + 1) * self.batch_size]))
-                )
+        """
+        Yields a batch of up to batch_size data points.
+
+        The number of data points yielded is in [1, batch_size].
+
+        Not thread-safe, having multiple iterators at the same time is
+        not supported.
+        """
+        self.ng_to_pos = {ng: 0 for ng in self.ng_list}
         if self.shuffle:
-            self.rng.shuffle(self.iter_order)
-        return self
-
-    # @timeit
-    def __next__(self):
-        """
-        Return the next element in iter. The returned batch might not have `batch_size` elements, if
-        there are fewer than `batch_size` elements remaining in the (n, g) dataset.
-
-        Description of the data (for num_samples = 1):
-        layout: (n, n) = Adjacency matrix
-        eigval: (n) = Eigenvalues of the Laplacian matrix
-        eigvec: (n, n) = Eigenvectors of the Laplacian matrix
-        gates: (g) = gate instances
-        gate_qubits: (2*g) = qubits involved in the gate instances
-        observation: (2 * n * n + n) = Observation of the target state
-        unprep_gate: (1) = Gate index
-        depth: (1) = Depth of the circuit
-
-        Example for n = 3, layout = fully connected, gate set = {H=0, CNOT=1, CZ=2}
-        layout: [[0, 1, 1], [1, 0, 1], [1, 1, 0]]
-        gates: [0, 0, 0, 1, 1, 1, 1, 1, 1, 2, 2, 2]
-            Explanation: 3 Hadamard, 6 CNOT, 3 CZ gate instances
-        gate_qubits: [1, 0, 2, 0, 3, 0, 2, 1, 3, 1, 3, 2, 1, 2, 1, 3, 2, 3, 2, 1, 3, 1, 3, 2]
-            Explanation: Each gate has 2 qubits for its gate instance. The second qubit is 0 if
-                it's a single qubit gate. The first 6 correspond to Hadamard, next 12 to CNOT and
-                last 6 to CZ.
-        observation: [[1,0,0,0,0,0,0], [0,0,0,0,1,0,0], [0,0,1,0,0,1,1]]
-            Explanation: Each row is [X1, ..., Xn, Z1, ..., Zn, sign], with the leftmost column
-            being the first qubit.
-        gate: 10
-        depth: 3
-        """
-        if self.iter_idx >= len(self.iter_order):
-            raise StopIteration
-
-        # Extract the current (n, g) key
-        k, idxs = self.iter_order[self.iter_idx]
-        # size = len(idxs)
-        n, g = k
-
-        # Return the data
-        if self.old:
-            num_samples = self.data[f"{n}/{g}/gate"].shape[0]
-            layout = (
-                self.data[f"{n}/{g}/layout"].reshape((num_samples, n, n))[idxs].astype(np.bool_)
-            )
-            eval, evec = transform_graph(layout)
-            gates = self.data[f"{n}/{g}/gate_oh"].reshape((num_samples, -1))[idxs]
-            gate_qubits = self.data[f"{n}/{g}/gate_qubit_oh"].reshape((num_samples, -1))[idxs]
-            unprep_gate = self.data[f"{n}/{g}/gate"][idxs]
-            observation = _convert_to_bool(
-                self.data[f"{n}/{g}/observation"].reshape((num_samples, -1))[idxs], n, self.old
-            )
-        else:
-            unprep_gate = self.data[f"{n}/{g}/unprep_gate"][idxs]
-            # Collect layouts from global data
-            global_n_idxs = self.data[f"{n}/{g}/global_n_idx"][idxs]
-            layout = self.data[f"global_n/{n}/layout"][global_n_idxs]
-            eval, evec = transform_graph(layout)
-            # Collect gates and gate_qubits from global data
-            global_g_idxs = self.data[f"{n}/{g}/global_g_idx"][idxs]
-            gates = self.data[f"global_g/{g}/gates"][global_g_idxs]
-            gate_qubits = self.data[f"global_g/{g}/gate_qubits"][global_g_idxs].reshape(
-                len(idxs), -1
-            )
-            observation = _convert_to_bool(self.data[f"{n}/{g}/observation"][idxs], n)
-        # Construct the input
-        object = {
-            "layout": layout,
-            "eigval": eval,
-            "eigvec": evec,
-            "gates": gates,
-            "gate_qubits": gate_qubits,
-            "observation": observation,
-            # self.data[f"{n}/{g}/observation"],
-            "unprep_gate": unprep_gate,
-            "depth": self.data[f"{n}/{g}/depth"][idxs],
-        }
-        self.iter_idx += 1
-        return object
-
-    def get_total_size(self):
-        return np.sum(self.size_list)
+            ii = self.rng.permutation(len(self.batch_ngs))
+            self.batch_ngs = [self.batch_ngs[i] for i in ii]
+            for v in self.idxs.values():
+                self.rng.shuffle(v)
+        for ng in self.batch_ngs:
+            n, g = ng
+            i0 = self.ng_to_pos[ng]
+            i1 = i0 + self.batch_size
+            self.ng_to_pos[ng] = i1
+            ii = self.idxs[ng][i0:i1]
+            n_ii = self.global_n_idx[ng][ii]
+            g_ii = self.global_g_idx[ng][ii]
+            yield {
+                "eigval": self.eigval[n][n_ii], # (bs, n)
+                "eigvec": self.eigvec[n][n_ii], # (bs, n, n)
+                "gates": self.gate[g][g_ii], # (bs, g)
+                "gate_qubits": self.gate_qubit[g][g_ii], # (bs, g, 2)
+                "observation_sxzxz": self.observation_sxzxz[ng][ii],
+                "unprep_gate": self.unprep_gate[ng][ii],
+                "scaled_depth": self.scaled_depth[ng][ii]
+            }

@@ -1,16 +1,17 @@
 import json
+import numpy as np
 import os
 import time
-from argparse import ArgumentParser, Namespace
-
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
 
+from argparse import ArgumentParser, Namespace
+from pathlib import Path
 from models.model_v0 import ModelV0
-from training.dataset import ShardReader, UnprepNpzDataloader
-
+from omegaconf import OmegaConf
+from omegaconf.dictconfig import DictConfig
+from training.dataset import LSPDataLoader
 
 def elapsed_str(elapsed_total, elapsed_last, curr_idx, total_batches, epoch_idx):
     avg_time = elapsed_total / (curr_idx + 1) if curr_idx > 0 else 0
@@ -27,124 +28,139 @@ def elapsed_str(elapsed_total, elapsed_last, curr_idx, total_batches, epoch_idx)
         f"Avg time: {avg_time:.7f} s/batch | Estimated time left for epoch: {est_str}"
     )
 
+def load_config(*, path: str | None = None, overrides: dict | None = None):
+    config = OmegaConf.create("""
+    model:
+      dA: 128
+      dB: 32
+      dC: 64
+      dD: 32
+      dE: 32
+      num_transformer_blocks: 2
+      homo_attention_n_head: 4
+      hetero_attention_embed_dim: 100
+      hetero_attention_n_head: 4
+    trainer:
+      schedule:
+        name: naive
+        epochs: 1
+      batch_size: 32
+      adam:
+        lr: 1e-3
+        betas:
+        - 0.9
+        - 0.999
+    changelog: "???"
+    """)
+    REQUIRED = ["trainer.train_file", "trainer.validation_file"]
+    if path:
+        config = OmegaConf.merge(config, OmegaConf.load(path))
+    if overrides:
+        config = OmegaConf.merge(config, overrides)
+    missing = [k for k in REQUIRED if OmegaConf.select(config, k) is None]
+    if missing:
+        raise KeyError(f"Missing required parameter(s): {', '.join(missing)}")
+    return config
 
-def normalize_depth(val, n, old: bool = False):
-    # The depth distribution is uniform till d_max. Transform to a variable which
-    # has mean 0 and variance 1.
-    if old:
-        return val / 2 - 2.2
-    dmax = n * (n + 3) / 2 / np.log2(n)
-    return (val - dmax / 2) / np.sqrt(dmax)
+def create_model(config: DictConfig, verbose=True):
+    model = ModelV0(
+        config.dA, config.dB, config.dC, config.dD, config.dE,
+        num_transformer_blocks=config.num_transformer_blocks,
+        homo_attention_n_head=config.homo_attention_n_head,
+        hetero_attention_embed_dim=config.hetero_attention_embed_dim,
+        hetero_attention_n_head=config.hetero_attention_n_head)
+    parameter_count = sum(p.numel() for p in model.parameters())
+    model.parameter_count = parameter_count
+    if verbose:
+        print(f"# model parameters = {parameter_count}")
+    return model
 
+class Metadata:
+    def __init__(self):
+        self.data = {}
 
-def unnormalize_depth(val, n, old: bool = False):
-    if old:
-        return (val + 2.2) * 2
-    dmax = n * (n + 3) / 2 / np.log2(n)
-    return val * np.sqrt(dmax) + dmax / 2
+    def add_args(self, args: Namespace):
+        try:
+            self.data["args"] = dict(args._get_kwargs())
+        except AttributeError:
+            self.data["args"] = args.__dict__
+        return self
 
+    def add_system_info(self):
+        self.data["cpu_count"] = os.cpu_count()
+        if torch.cuda.is_available():
+            gpu_count = torch.cuda.device_count()
+            self.data["gpu_count"] = gpu_count
+            self.data["gpu"] = []
+            for i in range(gpu_count):
+                props = torch.cuda.get_device_properties(i)
+                self.data["gpu"].append(
+                    {
+                        "name": torch.cuda.get_device_name(i),
+                        "memory": props.total_memory / (1024**3),
+                        "multi_processor_count": props.multi_processor_count,
+                    }
+                )
+        return self
 
-class HyperParameters:
-    def __init__(self, params: dict):
-        self.params = params
-        self._set_defaults()
+    def add_model_info(self, model: nn.Module):
+        self.data["model/parameter_count"] = model.parameter_count
+        return self
 
-    def _set_defaults(self):
-        defaults = {
-            "model/dA": 128,
-            "model/dB": 32,
-            "model/dC": 64,
-            "model/dD": 32,
-            "model/dE": 32,
-            "model/num_transformer_blocks": 2,
-            "model/homo_attention_n_head": 4,
-            "model/hetero_attention_embed_dim": 100,
-            "model/hetero_attention_n_head": 4,
-            "trainer/schedule": "naive",
-            "trainer/schedule/epochs": 1,
-            "trainer/batch_size": 32,
-            "trainer/adam/lr": 0.001,
-            "trainer/adam/betas": (0.9, 0.999),
-        }
-        for key, value in defaults.items():
-            self.params.setdefault(key, value)
+    def add_config(self, config: DictConfig):
+        self.data["config"] = OmegaConf.to_container(config)
+        return self
 
-        required = ["trainer/train_file", "trainer/validation_file", "trainer/test_file"]
-        for req in required:
-            assert req in self.params, f"Missing required parameter: {req}"
+    def update(self, new_data: dict):
+        self.data.update(new_data)
+        return self
 
-    def __getitem__(self, key):
-        return self.params[key]
-
-
-class ModelWrapper:
-
-    def __init__(self, hyperparams: HyperParameters):
-        hp = hyperparams.params
-        self.model = ModelV0(
-            hp["model/dA"],
-            hp["model/dB"],
-            hp["model/dC"],
-            hp["model/dD"],
-            hp["model/dE"],
-            num_transformer_blocks=hp["model/num_transformer_blocks"],
-            homo_attention_n_head=hp["model/homo_attention_n_head"],
-            hetero_attention_embed_dim=hp["model/hetero_attention_embed_dim"],
-            hetero_attention_n_head=hp["model/hetero_attention_n_head"],
-        )
-        print("Model details:")
-        print(f"# parameters = {self.count_parameters()}")
-
-    def count_parameters(self):
-        return sum(p.numel() for p in self.model.parameters())
+    def dump(self, folder: str):
+        with open(os.path.join(folder, "metadata.json"), "w") as f:
+            json.dump(self.data, f, indent=2)
 
 
 class Trainer:
 
     def __init__(
-        self,
-        model_wrapper: ModelWrapper,
-        hyperparams: HyperParameters,
-        output_folder: str,
+        self, model: nn.Module, config: DictConfig, verbose: bool = True,
         compile: bool = False,
-        seed: int = 1,
+        seed: int = 1
     ):
-        self.model = model_wrapper.model
+        self.model = model
         if compile:
             self.model.compile()
-        hp = hyperparams.params
-
-        assert hp["trainer/schedule"] == "naive"
+        assert config.schedule.name == "naive"
         self.optimizer = optim.Adam(
             self.model.parameters(),
-            lr=hp["trainer/adam/lr"],
-            betas=hp["trainer/adam/betas"],
+            lr=config.adam.lr,
+            betas=tuple(config.adam.betas)
         )
-        print(f"Optimizer: {self.optimizer.__class__.__name__}")
+        if verbose:
+            print(f"Optimizer: {self.optimizer.__class__.__name__}")
 
-        self.train_data = UnprepNpzDataloader(hp["trainer/train_file"], shuffle=True, seed=seed)
-        self.validation_data = UnprepNpzDataloader(
-            hp["trainer/validation_file"], shuffle=False, seed=seed
-        )
-        self.test_data = UnprepNpzDataloader(
-            hp["trainer/test_file"], shuffle=False, mload=False, seed=seed
-        )
+        self.train_data = LSPDataLoader(
+            config.train_file, batch_size=config.batch_size, shuffle=True,
+            seed=seed)
+        self.validation_data = LSPDataLoader(
+            config.validation_file, batch_size=config.batch_size, shuffle=False)
+        self.test_data = None # Load only if needed (later)
 
-        print("Total sizes of datasets:")
-        print(f"Train - {self.train_data.get_total_size()}")
-        print(f"Validation - {self.validation_data.get_total_size()}")
-        print(f"Test - {self.test_data.get_total_size()}")
+        if verbose:
+            print("Total #batches:")
+            print(f"Train - {len(self.train_data)}")
+            print(f"Validation - {len(self.validation_data)}")
 
-        batch_size = hp["trainer/batch_size"]
-        for data_loader in [self.train_data, self.validation_data, self.test_data]:
+        batch_size = config.batch_size
+        for data_loader in [self.train_data, self.validation_data]:
             data_loader.set_batch_size(batch_size)
 
         self.gate_loss = nn.CrossEntropyLoss()
         self.depth_loss = nn.MSELoss()
         self.alpha = 1
-        self.checkpoint_folder = output_folder
         self.device = None
         self.epoch_offset = 0
+        self.config = config
 
     def _get_checkpoint_mod(self, num_batches: int):
         # Checkpoint 2 times per epoch
@@ -182,56 +198,91 @@ class Trainer:
         self.model.to(self.device)
         print(f"Model now on device={self.device}")
 
-    def load_loss_history(self, params: HyperParameters):
-        def load_default(key, dic, default, file):
-            if key in dic:
-                return dic[key]
-            assert not os.path.exists(
-                file
-            ), f"Loss file {file} already exists. Rename before proceeding."
-            return default
+    def load_train_history(
+        self, ok_exists: bool = True, ok_new: bool = True
+    ):
+        output_dir = Path(self.config.output_dir)
+        hist_filename = output_dir / "train_history.npz"
+        assert ok_exists or ok_new, "Either ok_exists or ok_new must be True."
+        if hist_filename.exists():
+            if not ok_exists:
+                raise FileExistsError(f"File {hist_filename} already exists.")
+            with np.load(hist_filename) as data:
+                return (
+                    list(data["train_gate_loss"]),
+                    list(data["train_depth_loss"]),
+                    list(data["train_loss"]),
+                    list(data["val_gate"]),
+                    list(data["val_depth"])
+                )
+        else:
+            if not ok_new:
+                raise FileNotFoundError(f"File {hist_filename} does not exist.")
+            return [], [], [], [], []
 
-        base_dir = os.path.basename(params["model_file"]) if "model_file" in params.params else ""
-        gate_hist = load_default(
-            "train_gate_loss_history", params.params, np.array([]), f"{base_dir}/gate_loss.npy"
+    def save_train_history(
+        self, train_gate_loss, train_depth_loss, train_loss, val_gate, val_depth
+    ):
+        output_dir = Path(self.config.output_dir)
+        hist_filename = output_dir / "train_history.npz"
+        np.savez(
+            hist_filename,
+            train_gate_loss=np.array(train_gate_loss),
+            train_depth_loss=np.array(train_depth_loss),
+            train_loss=np.array(train_loss),
+            val_gate=np.array(val_gate),
+            val_depth=np.array(val_depth)
         )
-        depth_hist = load_default(
-            "train_depth_loss_history", params.params, np.array([]), f"{base_dir}/depth_loss.npy"
-        )
-        loss_hist = load_default(
-            "training_loss_history", params.params, np.array([]), f"{base_dir}/training_loss.npy"
-        )
-        return gate_hist, depth_hist, loss_hist, [], []
 
-    def load_checkpoint(self, params: HyperParameters):
+    def load_checkpoint(self) -> bool:
+        """
+        Loads model if the file exists.
+
+        Returns: True if a checkpoint was loaded, False otherwise.
+        """
         self.epoch_offset = 0
-        if "model_file" in params.params:
-            saved_data = torch.load(
-                params.params["model_file"], map_location="cpu", weights_only=True
-            )
-            self.model.load_state_dict(saved_data["model_state_dict"])
-            self.epoch_offset = saved_data["epoch"]
-
-    def train(self, params: HyperParameters):
-        train_gate_hist, train_depth_hist, loss_hist, val_gate_hist, val_depth_hist = (
-            self.load_loss_history(params)
+        model_filename = Path(self.config.output_dir) / "model_checkpoint.pt"
+        if not model_filename.exists():
+            return False
+        saved_data = torch.load(
+            model_filename, map_location="cpu", weights_only=True
         )
-        self.load_checkpoint(params)
+        self.model.load_state_dict(saved_data["model_state_dict"])
+        self.epoch_offset = saved_data["epoch"]
+        return True
+
+    def save_checkpoint(self, epoch, iter_idx, stats):
+        output_dir = Path(self.config.output_dir)
+        model_filename = output_dir / "model_checkpoint.pt"
+        data = {
+            "epoch": epoch,
+            "iter_idx": iter_idx,
+            "model_state_dict": self.model.state_dict(),
+            "optimizer_state_dict": self.optimizer.state_dict(),
+            **stats,
+        }
+        torch.save(data, model_filename)
+        print(f"Stored checkpoint ({iter_idx} iteration, {epoch} epoch)", flush=True)
+
+    def train(self):
+        train_gate_hist, train_depth_hist, loss_hist, val_gate_hist, val_depth_hist = (
+            self.load_train_history())
+        self.load_checkpoint()
         self.set_device()
 
-        train_batches = self.train_data.get_total_size() / self.train_data.batch_size
+        train_batches = len(self.train_data)
         checkpoint_mod = self._get_checkpoint_mod(train_batches)
         loss_history_mod = self._get_history_mod(train_batches)
         print(
-            f"Loss history and checkpoints will be stored every {loss_history_mod} and {checkpoint_mod} iterations respectively."
-        )
+            f"Loss history and checkpoints will be stored every "
+            f"{loss_history_mod} and {checkpoint_mod} iterations respectively.")
 
-        assert params["trainer/schedule"] == "naive", "Only naive training supported"
         for epoch in range(
-            self.epoch_offset, self.epoch_offset + params["trainer/schedule/epochs"]
+            self.epoch_offset, self.epoch_offset + self.config.schedule.epochs
         ):
             epoch_tic = time.time()
             batch_tic = time.time()
+            i = 0 # Avoid NameError for empty train set.
             for i, data in enumerate(self.train_data):
                 n = data["eigval"].shape[1]
                 self.optimizer.zero_grad()
@@ -247,9 +298,9 @@ class Trainer:
                 loss.backward()
                 self.optimizer.step()
 
-                loss_hist = np.append(loss_hist, loss.detach().cpu().item())
-                train_gate_hist = np.append(train_gate_hist, gate_loss.detach().cpu().item())
-                train_depth_hist = np.append(train_depth_hist, depth_loss.detach().cpu().item())
+                loss_hist.append(loss.detach().cpu().item())
+                train_gate_hist.append(gate_loss.detach().cpu().item())
+                train_depth_hist.append(depth_loss.detach().cpu().item())
 
                 if i % 1000 == 0:
                     print(
@@ -264,13 +315,15 @@ class Trainer:
                     batch_tic = time.time()
 
                 if i % loss_history_mod == 0:
-                    self.dump_loss_history(loss_hist, train_gate_hist, train_depth_hist)
+                    self.save_train_history(
+                        loss_hist, train_gate_hist, train_depth_hist,
+                        val_gate_hist, val_depth_hist)
 
                 if i % checkpoint_mod == 0 and i > 0:
                     val_gate_loss, val_depth_loss = self.calculate_validation_score()
-                    val_gate_hist = np.append(val_gate_hist, val_gate_loss)
-                    val_depth_hist = np.append(val_depth_hist, val_depth_loss)
-                    self.store_checkpoint(
+                    val_gate_hist.append(val_gate_loss)
+                    val_depth_hist.append(val_depth_loss)
+                    self.save_checkpoint(
                         epoch,
                         i,
                         {
@@ -283,9 +336,9 @@ class Trainer:
 
             # Store at end of epoch
             val_gate_loss, val_depth_loss = self.calculate_validation_score()
-            val_gate_hist = np.append(val_gate_hist, val_gate_loss)
-            val_depth_hist = np.append(val_depth_hist, val_depth_loss)
-            self.store_checkpoint(
+            val_gate_hist.append(val_gate_loss)
+            val_depth_hist.append(val_depth_loss)
+            self.save_checkpoint(
                 epoch,
                 i,
                 {
@@ -295,7 +348,9 @@ class Trainer:
                     "validation_depth_loss": val_depth_hist[-1],
                 },
             )
-            self.dump_loss_history(loss_hist, train_gate_hist, train_depth_hist)
+            self.save_train_history(
+                loss_hist, train_gate_hist, train_depth_hist,
+                val_gate_hist, val_depth_hist)
 
     def evaluate_model(self, dataset):
         self.set_device()
@@ -320,74 +375,24 @@ class Trainer:
         return self.evaluate_model(self.validation_data)
 
     def calculate_test_score(self):
+        if self.test_data is None:
+            try:
+                test_filename = self.config.test_file
+            except AttributeError:
+                raise ValueError(
+                    "config.test_file is required for `calculate_test_score`.")
+            self.test_data = LSPDataLoader(
+                test_filename, batch_size=self.config.batch_size,
+                shuffle=False)
         return self.evaluate_model(self.test_data)
-
-    def dump_loss_history(self, loss_history, gate_loss_history=None, depth_loss_history=None):
-        np.save(f"{self.checkpoint_folder}/training_loss.npy", loss_history)
-        if gate_loss_history is not None:
-            np.save(f"{self.checkpoint_folder}/gate_loss.npy", gate_loss_history)
-        if depth_loss_history is not None:
-            np.save(f"{self.checkpoint_folder}/depth_loss.npy", depth_loss_history)
-
-    def store_checkpoint(self, epoch, iter_idx, stats):
-        data = {
-            "epoch": epoch,
-            "iter_idx": iter_idx,
-            "model_state_dict": self.model.state_dict(),
-            **stats,
-        }
-        print(f"Stored checkpoint ({iter_idx} iteration, {epoch} epoch)", flush=True)
-        torch.save(data, f"{self.checkpoint_folder}/model-{epoch}-{iter_idx}.pt")
-
-
-def create_new_folder(prefix: str, args: Namespace):
-    name = f"{args.prefix}-{args.expid}"
-    folder = os.path.join(prefix, name)
-    os.makedirs(folder, exist_ok=True)
-    return folder
-
-
-def update_metadata_with_args(args: Namespace, metadata: dict):
-    metadata["args"] = dict(args._get_kwargs())
-
-
-def update_metadata_with_system(metadata: dict):
-    metadata["cpu_count"] = os.cpu_count()
-    if torch.cuda.is_available():
-        gpu_count = torch.cuda.device_count()
-        metadata["gpu_count"] = gpu_count
-        metadata["gpu"] = []
-        for i in range(gpu_count):
-            props = torch.cuda.get_device_properties(i)
-            metadata["gpu"].append(
-                {
-                    "name": torch.cuda.get_device_name(i),
-                    "memory": props.total_memory / (1024**3),
-                    "multi_processor_count": props.multi_processor_count,
-                }
-            )
-
-
-def update_metadata_with_model(model: ModelWrapper, metadata: dict):
-    metadata["model/parameter_count"] = model.count_parameters()
-
-
-def update_metadata_with_params(hyperparams: HyperParameters, metadata: dict):
-    metadata.update(hyperparams.params)
-
-
-def dump_metadata(folder: str, metadata: dict):
-    with open(os.path.join(folder, "metadata.json"), "w") as f:
-        json.dump(metadata, f, indent=2)
 
 
 def main():
     parser = ArgumentParser(description="Trainer hyperparameters")
     parser.add_argument(
-        "--param-file", type=str, required=True, help="json file for loading params"
-    )
-    parser.add_argument("--prefix", type=str, default="", help="Name prefix for folder")
-    parser.add_argument("--expid", type=str, default="", help="Name suffix for folder")
+        "--param-file", type=str, required=False, help="yaml with trainer parameters")
+    parser.add_argument("--prefix", type=str, default=None, help="Name prefix for folder")
+    parser.add_argument("--expid", type=str, default=None, help="Name suffix for folder")
     parser.add_argument("--compile", action="store_true", help="Use torch compile")
     parser.add_argument(
         "--info",
@@ -399,62 +404,48 @@ def main():
     args = parser.parse_args()
     print(f"Args: {args}")
 
-    with open(args.param_file, "r") as f:
-        param_dict = json.load(f)
-    params = HyperParameters(param_dict)
+    config_overrides = OmegaConf.create("""
+    trainer:
+      train_file: training-data/compiled/2-28-split-train.npz
+      validation_file: training-data/compiled/2-28-split-validation.npz
+      output_dir: output/bench0/
+      schedule:
+        epochs: 1
+    changelog: "Benchmark data loader."
+    seed: 1
+    """)
 
-    # Attach dataset paths to args for folder naming
-    args.train_file = params["trainer/train_file"]
-    args.validation_file = params["trainer/validation_file"]
-    args.test_file = params["trainer/test_file"]
-
-    output_folder = create_new_folder("output", args)
-    print(f"Output folder: {output_folder}")
-
-    # Set global seeds for reproducibility
-    seed = 1
-    torch.manual_seed(seed)
-    model = ModelWrapper(params)
-    trainer = Trainer(model, params, output_folder, compile=args.compile, seed=seed)
-
-    metadata = {}
-    update_metadata_with_args(args, metadata)
-    update_metadata_with_system(metadata)
-    update_metadata_with_model(model, metadata)
-    update_metadata_with_params(params, metadata)
-    metadata.update(
-        {
-            "validation_size": int(trainer.validation_data.get_total_size()),
-            "train_size": int(trainer.train_data.get_total_size()),
-            "train_batches": int(
-                trainer.train_data.get_total_size() // trainer.train_data.batch_size
-            ),
-            "test_size": int(trainer.test_data.get_total_size()),
-        }
-    )
-    metadata["test_size"] = int(trainer.test_data.get_total_size())
-    dump_metadata(output_folder, metadata)
-
-    # tic = time.time()
-    # loss = trainer.calculate_validation_score()
-    # toc = time.time()
-    # print(f"Initial validation loss = {loss} ({toc-tic} s)")
-    # metadata["validation_time"] = toc - tic
-
+    if args.param_file is not None:
+        config = load_config(path=args.param_file)
+    else:
+        config = load_config(overrides=config_overrides)
+    if args.prefix is not None and args.expid is not None:
+        config.trainer.output_dir = os.path.join(
+            "output", f"{args.prefix}-{args.expid}")
+    os.makedirs(config.trainer.output_dir, exist_ok=True)
+    print(f"Output folder: {config.trainer.output_dir}")
+    np.random.seed(config.seed)
+    torch.manual_seed(config.seed)
+    model = create_model(config.model)
+    trainer = Trainer(model, config.trainer, compile=args.compile, seed=config.seed)
+    metadata = (Metadata()
+        .add_args(args)
+        .add_system_info()
+        .add_model_info(model)
+        .add_config(config)
+        .update(
+           {
+               "validation_size": int(trainer.validation_data.num_samples),
+               "train_size": int(trainer.train_data.num_samples),
+               "train_batches": len(trainer.train_data),
+           }))
+    metadata.dump(config.trainer.output_dir)
     tic = time.time()
-    trainer.train(params)
+    trainer.train()
     toc = time.time()
     print(f"Training complete ({toc-tic:.1f} s)")
-    metadata["train_time"] = toc - tic
-
-    # Uncomment below to evaluate on test set after training and update metadata
-    # tic = time.time()
-    # gate_loss, depth_loss = trainer.calculate_test_score()
-    # metadata["test_time"] = time.time() - tic
-    # metadata["test_loss"] = gate_loss + depth_loss
-
-    dump_metadata(output_folder, metadata)
-
+    metadata.data["train_time"] = toc - tic
+    metadata.dump(config.trainer.output_dir)
 
 if __name__ == "__main__":
     main()
