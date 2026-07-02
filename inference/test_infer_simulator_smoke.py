@@ -209,6 +209,32 @@ def main():
         all(len(s) == 1 for s in path_dedup.seen_sets),
     )
 
+    # --- run_simulation accumulates on CPU and transfers to `torch_device` once;
+    # verify the returned tensors actually land on a non-CPU device and match the
+    # CPU-computed values exactly (the existing checks above all use
+    # torch_device="cpu", so they wouldn't catch a device-placement bug here). ---
+    if torch.cuda.is_available():
+        sim_cpu = make_simulator(candidates, unprepped)
+        cpu_out = sim_cpu.run_simulation(
+            states, gates, filter_size, hash_sets=[set()],
+            torch_device="cpu", remove_duplicates=True,
+        )
+        sim_cuda = make_simulator(candidates, unprepped)
+        cuda_out = sim_cuda.run_simulation(
+            states, gates, filter_size, hash_sets=[set()],
+            torch_device="cuda", remove_duplicates=True,
+        )
+        ok &= check(
+            "run_simulation(torch_device='cuda') returns tensors on cuda",
+            all(t.device.type == "cuda" for t in cuda_out),
+        )
+        ok &= check(
+            "run_simulation(torch_device='cuda') matches CPU computation",
+            all(torch.equal(a.cpu(), b) for a, b in zip(cuda_out, cpu_out)),
+        )
+    else:
+        print("[SKIP] run_simulation(torch_device='cuda') checks (no CUDA device available)")
+
     if not ok:
         print("\nSMOKE TEST FAILED")
         sys.exit(1)

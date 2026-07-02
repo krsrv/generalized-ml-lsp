@@ -148,9 +148,14 @@ class BatchSimulator:
 
         gates = gates.astype(np.int32)  # Needed for ctypes
         bs, bw, ts = states.shape
-        new_state = torch.zeros((bs, bw, filter_size, ts), dtype=torch.bool, device=torch_device)
-        is_unprepped = torch.zeros((bs, bw, filter_size), dtype=torch.bool, device=torch_device)
-        is_duplicate = torch.zeros((bs, bw, filter_size), dtype=torch.bool, device=torch_device)
+        # Accumulate results on CPU and transfer to `torch_device` once at the end
+        # instead of per-(i,j): each of the bs*bw iterations previously issued its
+        # own tiny H2D copy (`buffer_is_unprepped` created directly on-device, plus
+        # `.to(torch_device)` on every `new_state[i, j]` write), which dominates
+        # over the actual compute for small per-call tensors on a GPU device.
+        new_state = torch.zeros((bs, bw, filter_size, ts), dtype=torch.bool)
+        is_unprepped = torch.zeros((bs, bw, filter_size), dtype=torch.bool)
+        is_duplicate = torch.zeros((bs, bw, filter_size), dtype=torch.bool)
         filtered_idxs = torch.zeros((bs, bw, filter_size), dtype=torch.int)
         # Run simulation for each element in the beam
         for i in range(bs):
@@ -183,7 +188,7 @@ class BatchSimulator:
                     # device=torch_device,
                 ).to(torch.bool)
                 buffer_is_unprepped = torch.tensor(
-                    np.ctypeslib.as_array(sim_result.is_unprepped, shape=(k,)), device=torch_device
+                    np.ctypeslib.as_array(sim_result.is_unprepped, shape=(k,))
                 )
                 self.lib.free_stabilizers_struct(sim_result)
 
@@ -208,7 +213,7 @@ class BatchSimulator:
                     unique_idxs = torch.arange(filter_size)
                     duplicate_idxs = torch.empty(0, dtype=torch.long)
 
-                is_duplicate[i, j] = torch.zeros(filter_size, dtype=torch.bool, device=torch_device)
+                is_duplicate[i, j] = torch.zeros(filter_size, dtype=torch.bool)
                 if len(unique_idxs) >= filter_size:
                     filtered_idxs[i, j] = unique_idxs[:filter_size]
                 else:
@@ -217,10 +222,15 @@ class BatchSimulator:
                         (unique_idxs[:filter_size], duplicate_idxs[:duplicate_length])
                     )
                     is_duplicate[i, j, len(unique_idxs) : len(unique_idxs) + duplicate_length] = 0
-                new_state[i, j] = buffer_states[filtered_idxs[i, j]].to(torch_device)
+                new_state[i, j] = buffer_states[filtered_idxs[i, j]]
                 is_unprepped[i, j] = buffer_is_unprepped[filtered_idxs[i, j]]
 
-        return new_state, is_unprepped, is_duplicate, filtered_idxs.to(torch_device)
+        return (
+            new_state.to(torch_device),
+            is_unprepped.to(torch_device),
+            is_duplicate.to(torch_device),
+            filtered_idxs.to(torch_device),
+        )
 
 
 class Path:
