@@ -184,20 +184,26 @@ class BatchSimulator:
                 )
                 self.lib.free_stabilizers_struct(sim_result)
 
-                # Remove duplicates
-                duplicate_idxs = []
-                unique_idxs = []
-                for idx, candidate in enumerate(buffer_states):
-                    hv = hash(bytes(candidate.numpy()))
-                    if hv in seen_hashes and remove_duplicates:
-                        duplicate_idxs.append(idx)
-                    else:
-                        unique_idxs.append(idx)
-                        seen_hashes.add(hv)
-                    if len(unique_idxs) == filter_size:
-                        break
-                unique_idxs = torch.tensor(unique_idxs)
-                duplicate_idxs = torch.tensor(duplicate_idxs)
+                # Remove duplicates. When `remove_duplicates` is off, every candidate is
+                # kept in order, so skip the hashing work entirely (hashing each candidate
+                # here showed up as the single largest cost in the simulator loop).
+                if remove_duplicates:
+                    duplicate_idxs = []
+                    unique_idxs = []
+                    for idx, candidate in enumerate(buffer_states):
+                        hv = hash(bytes(candidate.numpy()))
+                        if hv in seen_hashes:
+                            duplicate_idxs.append(idx)
+                        else:
+                            unique_idxs.append(idx)
+                            seen_hashes.add(hv)
+                        if len(unique_idxs) == filter_size:
+                            break
+                    unique_idxs = torch.tensor(unique_idxs)
+                    duplicate_idxs = torch.tensor(duplicate_idxs)
+                else:
+                    unique_idxs = torch.arange(filter_size)
+                    duplicate_idxs = torch.empty(0, dtype=torch.long)
 
                 is_duplicate[i, j] = torch.zeros(filter_size, dtype=torch.bool, device=torch_device)
                 if len(unique_idxs) >= filter_size:
