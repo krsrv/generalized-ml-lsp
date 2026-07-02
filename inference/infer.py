@@ -263,7 +263,9 @@ class Path:
         self.duplicate_tracker = None
         self.remove_duplicates = remove_duplicates
         self.seen_sets = [set() for _ in range(bs)]
-        if width == 1:
+        # `seen_sets` is only ever read by `BatchSimulator.run_simulation` inside its
+        # `if remove_duplicates:` branch, so populating it here is wasted work otherwise.
+        if width == 1 and remove_duplicates:
             for i in range(bs):
                 self.seen_sets[i].add(hash(bytes(self.observations[i].cpu().numpy())))
 

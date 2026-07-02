@@ -1,5 +1,6 @@
 """
-Regression test for `BatchSimulator.run_simulation`'s duplicate-handling logic.
+Regression test for `BatchSimulator.run_simulation`'s duplicate-handling logic,
+and for `Path.__init__`'s matching `seen_sets` bookkeeping.
 
 Uses a fake `lib.run_simulator` (no compiled `libsim.so` needed) that returns
 hand-built candidate states, so the test exercises exactly the Python-side
@@ -14,7 +15,7 @@ import sys
 import numpy as np
 import torch
 
-from inference.infer import BatchSimulator
+from inference.infer import BatchSimulator, Path
 
 TS = 4  # state size per candidate
 
@@ -138,6 +139,26 @@ def main():
     ok &= check(
         "is_unprepped is gathered according to filtered_idxs",
         torch.equal(is_unprepped[0, 0], torch.tensor([False, True, False])),
+    )
+
+    # --- Path.__init__ only populates seen_sets when remove_duplicates=True ---
+    observations = torch.zeros((2, TS), dtype=torch.bool)
+    observations[1, 0] = True
+    path_no_dedup = Path(
+        n=TS // 2, observations=observations, depths=None, gates=None,
+        width=1, bs=2, remove_duplicates=False,
+    )
+    ok &= check(
+        "Path.__init__ skips seen_sets population when remove_duplicates=False",
+        all(len(s) == 0 for s in path_no_dedup.seen_sets),
+    )
+    path_dedup = Path(
+        n=TS // 2, observations=observations, depths=None, gates=None,
+        width=1, bs=2, remove_duplicates=True,
+    )
+    ok &= check(
+        "Path.__init__ populates seen_sets when remove_duplicates=True",
+        all(len(s) == 1 for s in path_dedup.seen_sets),
     )
 
     if not ok:
