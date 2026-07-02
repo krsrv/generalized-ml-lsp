@@ -155,18 +155,21 @@ class BatchSimulator:
         # Run simulation for each element in the beam
         for i in range(bs):
             seen_hashes = hash_sets[i] if hash_sets is not None else set()
+            # `layout`/`gate_set`/`num_gate_types` only depend on `i`, not `j`; compute
+            # them once per outer iteration instead of redundantly `bw` times.
+            layout = self.layouts[i].reshape(-1).ctypes.data_as(ctypes.POINTER(ctypes.c_bool))
+            gate_set = np.ascontiguousarray(self.gate_set[i]).ctypes.data_as(
+                ctypes.POINTER(ctypes.c_int)
+            )
+            num_gate_types = len(self.gate_set[i, :])
             for j in range(bw):
                 # Prepare input
-                layout = self.layouts[i].reshape(-1).ctypes.data_as(ctypes.POINTER(ctypes.c_bool))
-                gate_set = np.ascontiguousarray(self.gate_set[i]).ctypes.data_as(
-                    ctypes.POINTER(ctypes.c_int)
-                )
                 state = states[i, j].reshape(-1).ctypes.data_as(ctypes.POINTER(ctypes.c_bool))
                 # Run simulation
                 sim_result = self.lib.run_simulator(
                     n,
                     layout,
-                    len(self.gate_set[i, :]),  # num_gate_types
+                    num_gate_types,  # num_gate_types
                     gate_set,  # gate_set
                     state,  # tableau_arr
                     k,  # num_applied_gates

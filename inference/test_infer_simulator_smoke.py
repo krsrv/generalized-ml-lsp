@@ -141,6 +141,54 @@ def main():
         torch.equal(is_unprepped[0, 0], torch.tensor([False, True, False])),
     )
 
+    # --- layout/gate_set/num_gate_types (hoisted out of the inner `j` loop) are still
+    # correct for every (i, j), including j > 0 ---
+    bs2, bw2, n2 = 2, 3, TS // 2
+    recorded_calls = []
+
+    class RecordingLib:
+        def run_simulator(self, n_, layout, num_gate_types, gate_set, state, num_applied_gates, gates_ptr):
+            layout_vals = np.ctypeslib.as_array(layout, shape=(n_ * n_,)).copy()
+            gate_set_vals = np.ctypeslib.as_array(gate_set, shape=(num_gate_types,)).copy()
+            recorded_calls.append((layout_vals, gate_set_vals, num_gate_types))
+            k = num_applied_gates
+            candidates_local = np.zeros((k, TS), dtype=np.int32)
+            unprepped_local = np.zeros((k,), dtype=np.bool_)
+            result = BatchSimulator.Stabilizers()
+            result.stabilizers = candidates_local.ctypes.data_as(ctypes.POINTER(ctypes.c_int))
+            result.is_unprepped = unprepped_local.ctypes.data_as(ctypes.POINTER(ctypes.c_bool))
+            result.n = n_
+            result.k = k
+            self._keepalive = (candidates_local, unprepped_local)
+            return result
+
+        def free_stabilizers_struct(self, result):
+            pass
+
+    sim2 = BatchSimulator.__new__(BatchSimulator)
+    sim2.layouts = np.stack(
+        [np.zeros((n2, n2), dtype=np.bool_), np.ones((n2, n2), dtype=np.bool_)]
+    )
+    sim2.gate_set = np.array([[1, 1, 1], [2, 2, 2]], dtype=np.int32)
+    sim2.lib = RecordingLib()
+    states2 = np.zeros((bs2, bw2, TS), dtype=np.bool_)
+    gates2 = np.zeros((bs2, bw2, 4), dtype=np.int_)
+    sim2.run_simulation(
+        states2, gates2, filter_size, hash_sets=[set(), set()],
+        torch_device="cpu", remove_duplicates=False,
+    )
+    ok &= check(
+        "hoisted layout/gate_set are correct for every (i, j) call, including j > 0",
+        len(recorded_calls) == bs2 * bw2
+        and all(
+            np.array_equal(layout_vals, sim2.layouts[i].reshape(-1))
+            and np.array_equal(gate_set_vals, sim2.gate_set[i])
+            and num_gate_types == sim2.gate_set.shape[-1]
+            for idx, (layout_vals, gate_set_vals, num_gate_types) in enumerate(recorded_calls)
+            for i in [idx // bw2]
+        ),
+    )
+
     # --- Path.__init__ only populates seen_sets when remove_duplicates=True ---
     observations = torch.zeros((2, TS), dtype=torch.bool)
     observations[1, 0] = True
