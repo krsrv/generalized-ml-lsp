@@ -71,9 +71,7 @@ class Token_C_Embedding(nn.Module):
         super().__init__()
         self.gate_embedding_layer = GateEmbedding(token_dims.C_gt_1q_dim)
 
-    def forward(
-        self, n: Tensor, gates_oh: Tensor, gate_qubits_oh: Tensor, qubits: Tensor
-    ):
+    def forward(self, gates_oh: Tensor, gate_qubits_oh: Tensor, qubits: Tensor):
         return self.gate_embedding_layer(gates_oh, gate_qubits_oh, qubits)
 
 

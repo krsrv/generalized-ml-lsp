@@ -118,9 +118,7 @@ class ModelV0(nn.Module):
         qubit_tensors = self.token_B_embedding(graph_eigvecs)
         # Token C
         n = graph_eigvals.shape[-1]
-        gate_tensors = self.token_C_embedding(
-            torch.ones_like(gates_oh) * n, gates_oh, gate_qubit_oh, qubit_tensors
-        )
+        gate_tensors = self.token_C_embedding(gates_oh, gate_qubit_oh, qubit_tensors)
         # Token D
         observation = observation.reshape((*observation.shape[:-1], n, -1))
         observation_signs = torch.narrow(observation, -1, 2 * n, 1).squeeze(-1).long()
