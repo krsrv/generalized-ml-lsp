@@ -1,10 +1,82 @@
 import ctypes
+import os
 
 import numpy as np
 import torch
 import torch.nn as nn
 
 from training.dataset import transform_graph
+
+# Resolved relative to this file rather than the process cwd (the old
+# "../lsp_nonn/output/libsim.so" only worked when run from the repo root).
+_LIBSIM_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "..",
+    "lsp_nonn",
+    "output",
+    "libsim.so",
+)
+
+
+class _StabilizersStruct(ctypes.Structure):
+    """Mirrors the C `Stabilizers` struct returned by both `run_simulator`
+    and `run_simulator_batch` in `lsp_nonn/src/batch_simulator.cpp`."""
+
+    _fields_ = [
+        ("stabilizers", ctypes.POINTER(ctypes.c_int)),
+        ("is_unprepped", ctypes.POINTER(ctypes.c_bool)),
+        ("n", ctypes.c_int),
+        ("k", ctypes.c_int),
+    ]
+
+
+_SIMULATOR_LIB = None
+
+
+def _get_simulator_lib():
+    # Loaded lazily, once per process (cached in `_SIMULATOR_LIB`) instead of
+    # once per `BatchSimulator` instance (previously re-`dlopen`'d and
+    # re-declared every `infer_batch` call). Stays lazy rather than loading at
+    # import time so that code paths which never construct a real
+    # `BatchSimulator` (e.g. `test_infer_simulator_smoke.py`, which builds one
+    # via `BatchSimulator.__new__` with a fake `.lib`) don't require a
+    # compiled `libsim.so` to be present just to import this module.
+    global _SIMULATOR_LIB
+    if _SIMULATOR_LIB is None:
+        _SIMULATOR_LIB = _load_simulator_lib()
+    return _SIMULATOR_LIB
+
+
+def _load_simulator_lib():
+    lib = ctypes.CDLL(_LIBSIM_PATH)
+    lib.run_simulator.argtypes = [
+        ctypes.c_int,  # n
+        ctypes.POINTER(ctypes.c_bool),  # layout
+        ctypes.c_int,  # num_gate_types
+        ctypes.POINTER(ctypes.c_int),  # gate_set
+        ctypes.POINTER(ctypes.c_bool),  # tableau_arr
+        ctypes.c_int,  # num_applied_gates
+        ctypes.POINTER(ctypes.c_int),  # gates
+    ]
+    lib.run_simulator.restype = _StabilizersStruct
+
+    lib.run_simulator_batch.argtypes = [
+        ctypes.c_int,  # n
+        ctypes.c_int,  # bs
+        ctypes.c_int,  # bw
+        ctypes.POINTER(ctypes.c_bool),  # layouts (bs, n, n)
+        ctypes.c_int,  # num_gate_types
+        ctypes.POINTER(ctypes.c_int),  # gate_sets (bs, num_gate_types)
+        ctypes.POINTER(ctypes.c_bool),  # tableau_arr (bs, bw, n, 2n+1)
+        ctypes.c_int,  # num_applied_gates
+        ctypes.POINTER(ctypes.c_int),  # gates (bs, bw, num_applied_gates)
+    ]
+    lib.run_simulator_batch.restype = _StabilizersStruct
+
+    lib.free_stabilizers_struct.argtypes = [_StabilizersStruct]
+    lib.free_stabilizers_struct.restype = None
+    return lib
+
 
 # Map from `tableau_xz31.hpp`
 name_dict = {
@@ -55,14 +127,8 @@ class BatchSimulator:
     Class to run simulations on a batch of inputs. The key functions are `remove_batch` and `run_simulations`.
     Metadata about the inputs are stored during initialization.
     """
-    # Define a ctypes Structure matching the C struct
-    class Stabilizers(ctypes.Structure):
-        _fields_ = [
-            ("stabilizers", ctypes.POINTER(ctypes.c_int)),
-            ("is_unprepped", ctypes.POINTER(ctypes.c_bool)),
-            ("n", ctypes.c_int),
-            ("k", ctypes.c_int),
-        ]
+    # Alias kept for backward compatibility (tests construct this directly).
+    Stabilizers = _StabilizersStruct
 
     def __init__(self, layouts: np.ndarray, gate_set: np.ndarray):
         assert (
@@ -73,26 +139,7 @@ class BatchSimulator:
         ), f"gate_set must be a 2D np.ndarray, got shape={gate_set.shape}"
         self.layouts = layouts
         self.gate_set = gate_set.astype(np.int32)
-        self._setup_simulator_ctype()
-
-    def _setup_simulator_ctype(self):
-        # Load shared library
-        self.lib = ctypes.CDLL(
-            "../lsp_nonn/output/libsim.so",
-        )
-        self.lib.run_simulator.argtypes = [
-            ctypes.c_int,  # n
-            ctypes.POINTER(ctypes.c_bool),  # layout
-            ctypes.c_int,  # num_gate_types
-            ctypes.POINTER(ctypes.c_int),  # gate_set
-            ctypes.POINTER(ctypes.c_bool),  # tableau_arr
-            ctypes.c_int,  # num_applied_gates
-            ctypes.POINTER(ctypes.c_int),  # gates
-        ]
-        self.lib.run_simulator.restype = BatchSimulator.Stabilizers
-
-        self.lib.free_stabilizers_struct.argtypes = [BatchSimulator.Stabilizers]
-        self.lib.free_stabilizers_struct.restype = None
+        self.lib = _get_simulator_lib()
 
     def remove_batch(self, is_batch_unprepped: np.ndarray):
         """
@@ -157,40 +204,52 @@ class BatchSimulator:
         is_unprepped = torch.zeros((bs, bw, filter_size), dtype=torch.bool)
         is_duplicate = torch.zeros((bs, bw, filter_size), dtype=torch.bool)
         filtered_idxs = torch.zeros((bs, bw, filter_size), dtype=torch.int)
-        # Run simulation for each element in the beam
+
+        # Single FFI call over the whole (bs, bw) grid instead of one call per
+        # (i, j) pair (previously up to bs*bw separate ctypes calls per depth
+        # step). `layouts`/`gate_set` are constant across `j` within a batch
+        # row and `n`/`num_gate_types`/`k` are constant across the whole grid,
+        # so the C side (`run_simulator_batch`) can process everything in one
+        # shot; see `lsp_nonn/src/batch_simulator.cpp`.
+        num_gate_types = self.gate_set.shape[-1]
+        layouts_c = np.ascontiguousarray(self.layouts)
+        gate_set_c = np.ascontiguousarray(self.gate_set)
+        states_c = np.ascontiguousarray(states)
+        gates_c = np.ascontiguousarray(gates)
+
+        sim_result = self.lib.run_simulator_batch(
+            n,
+            bs,
+            bw,
+            layouts_c.ctypes.data_as(ctypes.POINTER(ctypes.c_bool)),
+            num_gate_types,
+            gate_set_c.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
+            states_c.ctypes.data_as(ctypes.POINTER(ctypes.c_bool)),
+            k,
+            gates_c.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
+        )
+        if not sim_result.stabilizers:
+            raise MemoryError("C function failed to allocate memory")
+        total = bs * bw * k
+        buffer_states_all = torch.tensor(
+            np.ctypeslib.as_array(sim_result.stabilizers, shape=(total * ts,)).reshape(
+                bs, bw, k, ts
+            ),
+        ).to(torch.bool)
+        buffer_is_unprepped_all = torch.tensor(
+            np.ctypeslib.as_array(sim_result.is_unprepped, shape=(total,)).reshape(bs, bw, k)
+        )
+        self.lib.free_stabilizers_struct(sim_result)
+
+        # Per-(i,j) dedup/filtering bookkeeping stays a Python loop: it's
+        # pure post-processing on already-computed candidates (no FFI calls
+        # left in this loop), and `seen_hashes` must be updated in order
+        # within a batch row for the hashing-based dedup to be correct.
         for i in range(bs):
             seen_hashes = hash_sets[i] if hash_sets is not None else set()
-            # `layout`/`gate_set`/`num_gate_types` only depend on `i`, not `j`; compute
-            # them once per outer iteration instead of redundantly `bw` times.
-            layout = self.layouts[i].reshape(-1).ctypes.data_as(ctypes.POINTER(ctypes.c_bool))
-            gate_set = np.ascontiguousarray(self.gate_set[i]).ctypes.data_as(
-                ctypes.POINTER(ctypes.c_int)
-            )
-            num_gate_types = len(self.gate_set[i, :])
             for j in range(bw):
-                # Prepare input
-                state = states[i, j].reshape(-1).ctypes.data_as(ctypes.POINTER(ctypes.c_bool))
-                # Run simulation
-                sim_result = self.lib.run_simulator(
-                    n,
-                    layout,
-                    num_gate_types,  # num_gate_types
-                    gate_set,  # gate_set
-                    state,  # tableau_arr
-                    k,  # num_applied_gates
-                    gates[i, j].ctypes.data_as(ctypes.POINTER(ctypes.c_int)),  # gates
-                )
-                # Access the result array
-                if not sim_result.stabilizers:
-                    raise MemoryError("C function failed to allocate memory")
-                buffer_states = torch.tensor(
-                    np.ctypeslib.as_array(sim_result.stabilizers, shape=(k * ts,)).reshape(k, -1),
-                    # device=torch_device,
-                ).to(torch.bool)
-                buffer_is_unprepped = torch.tensor(
-                    np.ctypeslib.as_array(sim_result.is_unprepped, shape=(k,))
-                )
-                self.lib.free_stabilizers_struct(sim_result)
+                buffer_states = buffer_states_all[i, j]
+                buffer_is_unprepped = buffer_is_unprepped_all[i, j]
 
                 # Remove duplicates. When `remove_duplicates` is off, every candidate is
                 # kept in order, so skip the hashing work entirely (hashing each candidate
@@ -273,7 +332,6 @@ class Path:
         self.unprepped = unprepped
         self.unprepped_list = unprepped_list
         self.identifier = identifier
-        self.duplicate_tracker = None
         self.remove_duplicates = remove_duplicates
         self.seen_sets = [set() for _ in range(bs)]
         # `seen_sets` is only ever read by `BatchSimulator.run_simulation` inside its
@@ -351,8 +409,6 @@ class Path:
         if self.gates is not None:
             self.gates = self.gates.reshape(bs, self.width, -1)
             self.gates = self.gates.gather(1, top_indices.expand(-1, -1, self.gates.shape[-1]))
-            self.identifier = self.identifier.reshape(bs, k)
-            self.identifier = self.identifier.reshape(-1)
             self.gates = self.gates.reshape(k * bs, -1)
 
         self.width = k
@@ -460,7 +516,6 @@ class Path:
             remove_duplicates=self.remove_duplicates,
         )
         # self.observations -> (bs, bw, k, 2n^2+n)
-        # self.duplicate_tracker  -> (bs, bw, k)
         # is_unprepped -> (bs, bw, k)
 
         ###############
@@ -510,7 +565,7 @@ class Path:
         self.bs = bs = self.bs - np.count_nonzero(is_batch_unprepped)
         if self.bs != 0:
             self.gates = self.gates[~is_batch_unprepped].reshape(ke * bw * bs, -1)
-            self.depths = self.depths[~is_batch_unprepped].transpose(0, 2).reshape(ke * bw * bs, -1)
+            self.depths = self.depths[~is_batch_unprepped].reshape(ke * bw * bs, -1)
             self.observations = self.observations[~is_batch_unprepped].reshape(ke * bw * bs, -1)
             self.identifier = self.identifier[~is_batch_unprepped].reshape(-1)
             self.seen_sets = [s for i, s in enumerate(self.seen_sets) if not is_batch_unprepped[i]]
